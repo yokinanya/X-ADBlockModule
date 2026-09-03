@@ -5,6 +5,7 @@
 
     <application
         android:allowBackup="false"
+        android:description="@string/module_description"
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
         android:name=".XAdApplication"
@@ -29,18 +30,11 @@
             </intent-filter>
         </receiver>
 
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="X-ADBlock：屏蔽 X 平台中文区黄色广告/垃圾机器人（词库可云端同步）" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="93" />
-        <meta-data
-            android:name="xposedscope"
-            android:value="com.twitter.android" />
+        <provider
+            android:name="io.github.libxposed.service.XposedProvider"
+            android:authorities="${applicationId}.XposedService"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
 
 </manifest>

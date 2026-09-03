@@ -91,8 +91,8 @@ class RuleRepository(private val context: Context) {
         }
         withContext(Dispatchers.IO) {
             dao.insertAll(specs.map { RuleEntity(sourceId = "local", kind = it.kind, pattern = it.pattern, priority = 90) })
+            RuleSnapshotStore.rebuild(context)
         }
-        RuleSnapshotStore.rebuild(context)
         return Result.success(specs.size)
     }
 

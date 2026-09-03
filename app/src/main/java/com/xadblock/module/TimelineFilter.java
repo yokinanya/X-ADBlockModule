@@ -3,6 +3,7 @@ package com.xadblock.module;
 import com.xadblock.module.data.Contract;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -15,9 +16,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
+import io.github.libxposed.api.XposedInterface;
 
 /**
  * Main-feed filter (X 12.22.0 layout):
@@ -91,6 +90,33 @@ final class TimelineFilter {
 
     private TimelineFilter() {}
 
+    static void clearState() {
+        FILTER_INSTALLED.set(false);
+        synchronized (EVALUATED_IDS) {
+            EVALUATED_IDS.clear();
+        }
+        BLOCKED_IDS.clear();
+        BLOCKED_POST_RESULTS.clear();
+        TEXT_MARK_CACHE.clear();
+        timelinePostClass = null;
+        timelineItemInterface = null;
+        postTextMethod = null;
+        postUrlMethod = null;
+        postEntryIdMethod = null;
+        postAuthorMethod = null;
+        postGrokMethod = null;
+        authorNameMethod = null;
+        authorHandleMethod = null;
+        authorHandle2Method = null;
+        i5RenderClass = null;
+        i5InvokeMethod = null;
+        I5_B5_FIELD = null;
+        B5_ENTRY_ID_FIELD = null;
+        B5_TEXT_FIELD = null;
+        B5_RANGE_FIELD = null;
+        POST_RESULT_FIELD = null;
+    }
+
     static void install(ClassLoader classLoader) throws Throwable {
         try {
             PostAccessors accessors = resolvePostAccessors(classLoader);
@@ -103,13 +129,15 @@ final class TimelineFilter {
             authorNameMethod = accessors.authorName;
             authorHandleMethod = accessors.authorHandle;
             authorHandle2Method = accessors.authorHandle2;
-            timelineItemInterface = XposedHelpers.findClass(TIMELINE_ITEM_IF, classLoader);
+            timelineItemInterface = findClass(TIMELINE_ITEM_IF, classLoader);
 
-            Class<?> uiEntryClass = XposedHelpers.findClass(UI_ENTRY, classLoader);
+            Class<?> uiEntryClass = findClass(UI_ENTRY, classLoader);
             int installedEntry = 0;
             for (Method method : uiEntryClass.getDeclaredMethods()) {
                 if (isFeedEntryMethod(method)) {
-                    XposedBridge.hookMethod(method,
+                        HookEntry.registerHook(
+                            method,
+                            hookId("feed-entry", method),
                             createFeedListCallback(method.getParameterTypes()[0]));
                     installedEntry++;
                     HookEntry.log(" hooked feed entry method: " + method);
@@ -167,7 +195,7 @@ final class TimelineFilter {
 
     private static int hookListLambdaCtor(final ClassLoader classLoader, String className, String label) {
         try {
-            Class<?> lambdaClass = XposedHelpers.findClass(className, classLoader);
+            Class<?> lambdaClass = findClass(className, classLoader);
             int installed = 0;
             for (Constructor<?> constructor : lambdaClass.getDeclaredConstructors()) {
                 Class<?>[] parameterTypes = constructor.getParameterTypes();
@@ -183,8 +211,10 @@ final class TimelineFilter {
                 if (!(parameterTypes[2] == boolean.class)) {
                     continue;
                 }
-                XposedBridge.hookMethod(constructor,
-                        createFeedListCallback(parameterTypes[0]));
+                HookEntry.registerHook(
+                    constructor,
+                    hookId("feed-lambda-" + label, constructor),
+                    createFeedListCallback(parameterTypes[0]));
                 installed++;
                 HookEntry.log(" hooked feed lambda ctor " + label + ": " + constructor);
             }
@@ -205,7 +235,7 @@ final class TimelineFilter {
     private static void hookPostResultImplementations() {
         for (String implName : POST_RESULT_IMPLS) {
             try {
-                Class<?> implClass = XposedHelpers.findClass(implName, timelinePostClass.getClassLoader());
+                Class<?> implClass = findClass(implName, timelinePostClass.getClassLoader());
                 hookAllStringGetters(implClass, false);
                 HookEntry.log(" hooked post result string getters: " + implName);
             } catch (Throwable ignored) {
@@ -248,39 +278,32 @@ final class TimelineFilter {
             }
             try {
                 final String getterName = method.getDeclaringClass().getName() + "#" + method.getName();
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            Object instance = param.thisObject;
-                            if (instance == null) return;
-                            String mark = BLOCKED_POST_RESULTS.get(instance);
-                            if (mark == null) {
-                                Object result = param.getResult();
-                                if (result instanceof String) {
-                                    String text = (String) result;
-                                    if (text != null && !text.isEmpty()) {
-                                        String cached = TEXT_MARK_CACHE.get(text);
-                                        if (cached == null) {
-                                            cached = RuleBridge.matchText(text);
-                                            TEXT_MARK_CACHE.put(text, cached);
-                                        }
-                                        if (cached != null) {
-                                            mark = cached;
-                                        }
-                                    }
+                HookEntry.registerHook(method, hookId("post-result-" + getterName, method), chain -> {
+                    Object result = chain.proceed();
+                    try {
+                        Object instance = chain.getThisObject();
+                        if (instance == null) return result;
+                        String mark = BLOCKED_POST_RESULTS.get(instance);
+                        if (mark == null && result instanceof String) {
+                            String text = (String) result;
+                            if (!text.isEmpty()) {
+                                String cached = TEXT_MARK_CACHE.get(text);
+                                if (cached == null) {
+                                    cached = RuleBridge.matchText(text);
+                                    TEXT_MARK_CACHE.put(text, cached);
+                                }
+                                if (cached != null) {
+                                    mark = cached;
                                 }
                             }
-                            // NOTE: result rewriting is DISABLED - X renders rich-text spans
-                            // (DisplayTextRange) against the original text, replacing it with
-                            // a shorter string crashes with "Error slicing text". Detection and
-                            // history stay active; hiding must happen at the data/list level.
-                            if (false && mark != null && !mark.equals(param.getResult())) {
-                                param.setResult(mark);
-                            }
-                        } catch (Throwable ignored) {
                         }
+                            if (mark != null && !mark.isEmpty()) {
+                                diagMark(getterName);
+                            }
+                    } catch (Throwable failure) {
+                        HookEntry.log("string getter inspection failed: " + getterName + ": " + failure);
                     }
+                    return result;
                 });
             } catch (Throwable ignored) {
             }
@@ -295,37 +318,33 @@ final class TimelineFilter {
         int installed = 0;
         for (Constructor<?> constructor : post.getDeclaredConstructors()) {
             try {
-                XposedBridge.hookMethod(constructor, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            Object item = param.thisObject;
-                            if (item == null) {
-                                return;
-                            }
-                            String entryId = invokeString(item, postEntryIdMethod);
-                            if (entryId == null || !entryId.startsWith("conversationthread-")) {
-                                return;
-                            }
-                            if (BLOCKED_IDS.containsKey(entryId)) {
-                                return;
-                            }
-                            String text = invokeString(item, postTextMethod);
-                            String url = invokeString(item, postUrlMethod);
-                            boolean isGrok = isGrokPost(item);
-                            String author = resolveAuthorText(item);
-                            RuleBridge.Match match =
-                                    RuleBridge.firstMatch(text, url, author, entryId, isGrok);
-                            if (match != null) {
-                                BLOCKED_IDS.put(entryId, RuleBridge.getMarkText());
-                                rememberPostResult(item, RuleBridge.getMarkText());
-                                diagHit(entryId + " " + (text == null ? "<null>" : text.substring(0, Math.min(32, text.length()))));
-                                RuleBridge.recordBlock(match, text);
-                            }
-                        } catch (Throwable ignored) {
-                            // detection is best-effort; rendering stays intact
+                HookEntry.registerHook(constructor, hookId("post-constructor", constructor), chain -> {
+                    Object result = chain.proceed();
+                    try {
+                        Object item = chain.getThisObject();
+                        if (item == null) return result;
+                        String entryId = invokeString(item, postEntryIdMethod);
+                        if (entryId == null || !entryId.startsWith("conversationthread-")) {
+                            return result;
                         }
+                        if (BLOCKED_IDS.containsKey(entryId)) return result;
+                        String text = invokeString(item, postTextMethod);
+                        String url = invokeString(item, postUrlMethod);
+                        boolean isGrok = isGrokPost(item);
+                        String author = resolveAuthorText(item);
+                        RuleBridge.Match match = RuleBridge.firstMatch(
+                                text, url, author, entryId, isGrok);
+                        if (match != null) {
+                            BLOCKED_IDS.put(entryId, RuleBridge.getMarkText());
+                            rememberPostResult(item, RuleBridge.getMarkText());
+                            diagHit(entryId + " " + (text == null
+                                    ? "<null>" : text.substring(0, Math.min(32, text.length()))));
+                            RuleBridge.recordBlock(match, text);
+                        }
+                    } catch (Throwable failure) {
+                        HookEntry.log("post constructor inspection failed: " + failure);
                     }
+                    return result;
                 });
                 installed++;
             } catch (Throwable ignored) {
@@ -369,7 +388,7 @@ final class TimelineFilter {
     }
 
     private static PostAccessors resolvePostAccessors(ClassLoader classLoader) throws Throwable {
-        Class<?> postClass = XposedHelpers.findClass(TIMELINE_POST, classLoader);
+        Class<?> postClass = findClass(TIMELINE_POST, classLoader);
         Method text = findNoArgMethod(postClass, "getText");
         Method url = findNoArgMethod(postClass, "getUrl");
         if (text == null) {
@@ -448,7 +467,7 @@ final class TimelineFilter {
     private static boolean resolveRenderFields() {
         ClassLoader loader = timelinePostClass.getClassLoader();
         try {
-            Class<?> b5Class = XposedHelpers.findClass("com.x.urt.items.post.b5", loader);
+            Class<?> b5Class = findClass("com.x.urt.items.post.b5", loader);
             if (B5_ENTRY_ID_FIELD == null) {
                 for (java.lang.reflect.Field field : b5Class.getDeclaredFields()) {
                     if ("a".equals(field.getName()) && field.getType() == String.class) {
@@ -459,7 +478,7 @@ final class TimelineFilter {
                 }
             }
             if (I5_B5_FIELD == null && i5RenderClass == null) {
-                i5RenderClass = XposedHelpers.findClass("com.x.urt.items.post.i5", loader);
+                i5RenderClass = findClass("com.x.urt.items.post.i5", loader);
                 for (java.lang.reflect.Field field : i5RenderClass.getDeclaredFields()) {
                     if ("a".equals(field.getName()) && field.getType() == b5Class) {
                         field.setAccessible(true);
@@ -491,24 +510,25 @@ final class TimelineFilter {
                     && method.getReturnType() == Object.class) {
                 i5InvokeMethod = method;
                 try {
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                Object i5 = param.thisObject;
-                                if (i5 == null || BLOCKED_IDS.isEmpty()) return;
-                                if (RuleBridge.getDisplayMode() != Contract.DISPLAY_MODE_REMOVE) return;
+                    HookEntry.registerHook(method, hookId("render-content", method), chain -> {
+                        try {
+                            Object i5 = chain.getThisObject();
+                            if (i5 != null && !BLOCKED_IDS.isEmpty()
+                                    && RuleBridge.getDisplayMode() == Contract.DISPLAY_MODE_REMOVE) {
                                 Object b5 = b5Field.get(i5);
-                                if (b5 == null) return;
-                                Object entryId = entryField.get(b5);
-                                if (entryId instanceof String
-                                        && BLOCKED_IDS.containsKey((String) entryId)) {
-                                    param.setResult(null);
-                                    diagSkip((String) entryId);
+                                if (b5 != null) {
+                                    Object entryId = entryField.get(b5);
+                                    if (entryId instanceof String
+                                            && BLOCKED_IDS.containsKey((String) entryId)) {
+                                        diagSkip((String) entryId);
+                                        return null;
+                                    }
                                 }
-                            } catch (Throwable ignored) {
                             }
+                        } catch (Throwable failure) {
+                            HookEntry.log("content render inspection failed: " + failure);
                         }
+                        return chain.proceed();
                     });
                     HookEntry.log(" hooked i5.invoke skip (b5.entryId)");
                 } catch (Throwable failure) {
@@ -528,7 +548,7 @@ final class TimelineFilter {
         }
         Class<?> rowClass;
         try {
-            rowClass = XposedHelpers.findClass("com.x.jetfuel.v2.element.attribute.h",
+                rowClass = findClass("com.x.jetfuel.v2.element.attribute.h",
                     timelinePostClass.getClassLoader());
         } catch (Throwable failure) {
             HookEntry.log("post row class load failed: " + failure);
@@ -551,24 +571,24 @@ final class TimelineFilter {
                 continue;
             }
             try {
-                XposedBridge.hookMethod(method, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        try {
-                            if (BLOCKED_IDS.isEmpty()) return;
-                            if (RuleBridge.getDisplayMode() != Contract.DISPLAY_MODE_REMOVE) return;
-                            Object b5 = param.args[0];
-                            if (b5 == null) return;
-                            Object entryId = entryField.get(b5);
-                            if (!(entryId instanceof String)
-                                    || !BLOCKED_IDS.containsKey((String) entryId)) {
-                                return;
+                HookEntry.registerHook(method, hookId("render-row", method), chain -> {
+                    try {
+                        if (!BLOCKED_IDS.isEmpty()
+                                && RuleBridge.getDisplayMode() == Contract.DISPLAY_MODE_REMOVE) {
+                            Object b5 = chain.getArg(0);
+                            if (b5 != null) {
+                                Object entryId = entryField.get(b5);
+                                if (entryId instanceof String
+                                        && BLOCKED_IDS.containsKey((String) entryId)) {
+                                    diagRowSkip((String) entryId);
+                                    return null;
+                                }
                             }
-                            param.setResult(null);
-                            diagSkip((String) entryId);
-                        } catch (Throwable ignored) {
                         }
+                    } catch (Throwable failure) {
+                        HookEntry.log("row render inspection failed: " + failure);
                     }
+                    return chain.proceed();
                 });
                 hooked++;
             } catch (Throwable ignored) {
@@ -591,7 +611,7 @@ final class TimelineFilter {
         }
         Class<?> b5Class;
         try {
-            b5Class = XposedHelpers.findClass("com.x.urt.items.post.b5",
+                b5Class = findClass("com.x.urt.items.post.b5",
                     timelinePostClass.getClassLoader());
         } catch (Throwable failure) {
             HookEntry.log("mark placeholder class load failed: " + failure);
@@ -634,33 +654,30 @@ final class TimelineFilter {
         int hooked = 0;
         for (Constructor<?> constructor : b5Class.getDeclaredConstructors()) {
             try {
-                XposedBridge.hookMethod(constructor, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            if (RuleBridge.getDisplayMode() != Contract.DISPLAY_MODE_MARK) {
-                                return;
-                            }
-                            if (BLOCKED_IDS.isEmpty()) return;
-                            Object b5 = param.thisObject;
-                            if (b5 == null) return;
-                            Object entryId = param.args.length > 0 ? param.args[0] : null;
-                            if (!(entryId instanceof String)) {
-                                try {
-                                    entryId = entryField.get(b5);
-                                } catch (Throwable ignored) {
-                                    return;
-                                }
-                            }
-                            String mark = BLOCKED_IDS.get((String) entryId);
-                            if (mark == null || mark.isEmpty()) return;
-                            textField.set(b5, mark);
-                            if (rangeField != null && rangeCtorF != null) {
-                                rangeField.set(b5, rangeCtorF.newInstance(0, mark.length()));
-                            }
-                        } catch (Throwable ignored) {
+                HookEntry.registerHook(constructor, hookId("render-placeholder", constructor), chain -> {
+                    Object result = chain.proceed();
+                    try {
+                        if (RuleBridge.getDisplayMode() != Contract.DISPLAY_MODE_MARK
+                                || BLOCKED_IDS.isEmpty()) {
+                            return result;
                         }
+                        Object b5 = chain.getThisObject();
+                        if (b5 == null) return result;
+                        Object entryId = chain.getArgs().isEmpty() ? null : chain.getArg(0);
+                        if (!(entryId instanceof String)) {
+                            entryId = entryField.get(b5);
+                        }
+                        if (!(entryId instanceof String)) return result;
+                        String mark = BLOCKED_IDS.get((String) entryId);
+                        if (mark == null || mark.isEmpty()) return result;
+                        textField.set(b5, mark);
+                        if (rangeField != null && rangeCtorF != null) {
+                            rangeField.set(b5, rangeCtorF.newInstance(0, mark.length()));
+                        }
+                    } catch (Throwable failure) {
+                        HookEntry.log("placeholder construction failed: " + failure);
                     }
+                    return result;
                 });
                 hooked++;
             } catch (Throwable ignored) {
@@ -669,42 +686,52 @@ final class TimelineFilter {
         HookEntry.log(" hooked mark placeholder b5.text: " + hooked);
     }
 
-    private static XC_MethodHook createFeedListCallback(final Class<?> immutableInterface) {
-        return new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+    private static XposedInterface.Hooker createFeedListCallback(final Class<?> immutableInterface) {
+        return chain -> {
                 if (!FILTER_INSTALLED.get()) {
-                    return;
+                    return chain.proceed();
                 }
-                Object[] args = param.args;
-                if (args == null || args.length == 0 || args[0] == null) {
-                    return;
+                if (chain.getArgs().isEmpty() || chain.getArg(0) == null) {
+                    return chain.proceed();
                 }
                 if (diagAllowed(DIAG_LAST_ENTRY, 5000)) {
-                    Object list = args[0];
+                    Object list = chain.getArg(0);
                     int size = (list instanceof List<?>) ? ((List<?>) list).size() : -1;
-                    HookEntry.log("diag|ENTRY " + param.method + " listSize=" + size
-                            + " arg1=" + (args.length > 1 && args[1] != null ? args[1].getClass().getName() : "<null>"));
+                    HookEntry.log("diag|ENTRY " + chain.getExecutable() + " listSize=" + size
+                            + " arg1=" + (chain.getArgs().size() > 1 && chain.getArg(1) != null
+                            ? chain.getArg(1).getClass().getName() : "<null>"));
                 }
-                Object originalList = args[0];
+                Object originalList = chain.getArg(0);
                 if (!(originalList instanceof List<?>)) {
-                    return;
+                    return chain.proceed();
                 }
-                Object argsAtOne = args[1];
+                Object argsAtOne = chain.getArgs().size() > 1 ? chain.getArg(1) : null;
                 if (argsAtOne == null || !TIMELINE_TYPE.equals(argsAtOne.getClass().getName())) {
-                    return;
+                    return chain.proceed();
                 }
                 List<?> filtered = filter((List<?>) originalList);
                 if (filtered == null) {
-                    return;
+                    return chain.proceed();
                 }
                 if (filtered.size() == ((List<?>) originalList).size()) {
-                    return;
+                    return chain.proceed();
                 }
-                args[0] = createImmutableListProxy(
+                Object filteredList = createImmutableListProxy(
                         immutableInterface, originalList, filtered);
-            }
+                Object[] args = chain.getArgs().toArray(new Object[0]);
+                args[0] = filteredList;
+                return chain.proceed(args);
         };
+    }
+
+    private static Class<?> findClass(String className, ClassLoader classLoader)
+            throws ClassNotFoundException {
+        return Class.forName(className, true, classLoader);
+    }
+
+    private static String hookId(String prefix, Executable executable) {
+        return prefix + ":" + executable.getDeclaringClass().getName()
+                + ":" + executable.getName() + ":" + executable.getParameterCount();
     }
 
     private static List<?> filter(List<?> original) {

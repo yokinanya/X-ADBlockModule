@@ -3,7 +3,7 @@ package com.xadblock.module;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.AssetManager;
-import android.content.res.XModuleResources;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 
 import com.xadblock.module.data.Contract;
@@ -27,14 +27,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
-import de.robv.android.xposed.XSharedPreferences;
-
 /**
  * Runs inside the X process. Loads rule snapshots written by the module app
- * through LSPosed's "New XSharedPreferences" bridge (immune to Android 11+
- * package visibility), matches post text/url against them and reports blocks
- * back via exported broadcasts. The packaged asset bootstrap stays as the
- * no-network fallback.
+ * through LibXposed Remote Preferences, matches post text/url against them and
+ * reports blocks back via exported broadcasts. The packaged asset bootstrap
+ * stays as the explicit no-configuration startup path.
  */
 public final class RuleBridge {
     private static final String TAG = "[X-ADBlock]";
@@ -49,7 +46,8 @@ public final class RuleBridge {
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
 
     private static volatile Context targetContext;
-    private static volatile XSharedPreferences snapshotPrefs;
+    private static volatile SharedPreferences snapshotPrefs;
+    private static volatile SharedPreferences.OnSharedPreferenceChangeListener snapshotListener;
     private static volatile long lastSnapshotVersion = Long.MIN_VALUE;
     private static volatile String lastHeartbeatStatus = "STARTING";
 
@@ -107,10 +105,17 @@ public final class RuleBridge {
             return;
         }
         try {
-            snapshotPrefs = new XSharedPreferences(Contract.MODULE_PACKAGE, Contract.PREF_SNAPSHOT);
+            snapshotPrefs = HookEntry.remotePreferences(Contract.PREF_SNAPSHOT);
+            snapshotListener = (preferences, key) -> {
+                if (key == null || Contract.KEY_SNAPSHOT_VERSION.equals(key)
+                        || Contract.KEY_SNAPSHOT_DATA.equals(key)) {
+                    IO.execute(() -> reloadIfChanged(true));
+                }
+            };
+            snapshotPrefs.registerOnSharedPreferenceChangeListener(snapshotListener);
         } catch (Throwable throwable) {
             snapshotPrefs = null;
-            HookEntry.log("XSharedPreferences unavailable, falling back to asset bootstrap: " + throwable);
+            HookEntry.log("Remote Preferences unavailable; using packaged bootstrap: " + throwable);
         }
         reloadIfChanged(true);
         lastHeartbeatStatus = "ACTIVE";
@@ -121,21 +126,39 @@ public final class RuleBridge {
         HookEntry.log("bridge initialized: snapshotVersion=" + lastSnapshotVersion);
     }
 
+    static void clearState() {
+        SharedPreferences prefs = snapshotPrefs;
+        SharedPreferences.OnSharedPreferenceChangeListener listener = snapshotListener;
+        if (prefs != null && listener != null) {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener);
+        }
+        snapshotPrefs = null;
+        snapshotListener = null;
+        targetContext = null;
+        ACTIVE.set(null);
+        EVAL_CACHE.clear();
+        EVENT_QUEUE.clear();
+        PENDING_EVENTS.set(0);
+        STAT_TOTAL.set(0);
+        BOOTSTRAPPED.set(false);
+        INITIALIZED.set(false);
+        lastSnapshotVersion = Long.MIN_VALUE;
+        lastHeartbeatStatus = "STARTING";
+    }
+
     /** Rebuilds the active snapshot from the module prefs when untouched; falls back to assets. */
     private static void reloadIfChanged(boolean force) {
         ensureBootstrap();
-        XSharedPreferences prefs = snapshotPrefs;
+        SharedPreferences prefs = snapshotPrefs;
         if (prefs == null) {
             return;
         }
         try {
-            prefs.reload();
-            boolean changed = prefs.hasFileChanged() || force;
-            if (!changed && lastSnapshotVersion != Long.MIN_VALUE) {
+            long version = prefs.getLong(Contract.KEY_SNAPSHOT_VERSION, 0L);
+            if (!force && version == lastSnapshotVersion) {
                 return;
             }
             String data = prefs.getString(Contract.KEY_SNAPSHOT_DATA, "");
-            long version = prefs.getLong(Contract.KEY_SNAPSHOT_VERSION, 0L);
             if (data == null || data.isEmpty() || version <= 0) {
                 return;
             }
@@ -156,7 +179,7 @@ public final class RuleBridge {
         }
     }
 
-    private static void loadOptions(XSharedPreferences prefs) {
+    private static void loadOptions(SharedPreferences prefs) {
         try {
             displayMode = prefs.getInt(Contract.KEY_DISPLAY_MODE, Contract.DISPLAY_MODE_MARK);
             optUsername = prefs.getBoolean(Contract.KEY_OPT_USERNAME, true);
@@ -203,13 +226,13 @@ public final class RuleBridge {
             return;
         }
         BOOTSTRAPPED.set(true);
-        String path = HookEntry.getModulePath();
-        if (path == null) {
-            return;
-        }
         try {
-            XModuleResources resources = XModuleResources.createInstance(path, null);
-            AssetManager assets = resources.getAssets();
+            Context context = targetContext;
+            if (context == null) {
+                throw new IllegalStateException("target context is not initialized");
+            }
+            AssetManager assets = context.createPackageContext(
+                    Contract.MODULE_PACKAGE, Context.CONTEXT_IGNORE_SECURITY).getAssets();
             List<Rule> rules = new ArrayList<>();
             try (InputStream in = assets.open(BUILTIN_ASSET);
                  BufferedReader reader = new BufferedReader(

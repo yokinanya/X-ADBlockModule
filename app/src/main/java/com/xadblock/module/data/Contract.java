@@ -4,23 +4,19 @@ package com.xadblock.module.data;
  * Shared configuration contract between the injected hook (target process, X app)
  * and the module app.
  *
- * Cross-process channel notes (X 12.22.0, LSPosed API 93):
- *  - Android 11+ package visibility prevents the X app from resolving our
- *    ContentProvider (provider authorities are filtered unless declared in the
- *    target manifest's <queries>, which we cannot modify).
- *  - The supported channel is LSPosed "New XSharedPreferences": the module app
- *    writes rules snapshots with MODE_WORLD_READABLE and LSPosed redirects them
- *    into an SELinux bridge readable by any injected process; the hook reads
- *    them via de.robv.android.xposed.XSharedPreferences.
+ * Cross-process channel notes (X 12.22.0, LibXposed API 102):
+ *  - The module app writes snapshots through LibXposed Remote Preferences.
+ *  - The injected target process reads the same remote preference group through
+ *    XposedInterface.getRemotePreferences(String).
  *  - Blocks/heartbeats go back through an exported broadcast (Binder-safe batching).
  */
 public final class Contract {
     public static final String TARGET_PACKAGE = "com.twitter.android";
 
-    /** Module package (scope of the XSharedPreferences and the broadcast target). */
+    /** Module package (scope of the Remote Preferences and the broadcast target). */
     public static final String MODULE_PACKAGE = "com.xadblock.module";
 
-    /** New-XSharedPreferences snapshot file (module writes, hook reads). */
+    /** Remote Preferences snapshot group (module writes, hook reads). */
     public static final String PREF_SNAPSHOT = "rules_snapshot";
     public static final String KEY_SNAPSHOT_VERSION = "snapshot_version";
     public static final String KEY_SNAPSHOT_DATA = "snapshot_data";
