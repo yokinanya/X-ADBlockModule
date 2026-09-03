@@ -3,8 +3,13 @@
 一个基于 [LSPosed](https://github.com/LSPosed/LSPosed) 的 X (Twitter) Android 模块，用于屏蔽 X 官方 App 中文区黄色广告与垃圾机器人帖子。**官方商业广告一概不碰**（约定原则）。
 
 > ⚠️ 仅供学习与个人使用。本模块通过逆向分析 X 12.22.0 的渲染结构实现，随版本更新可能失效。
+本人能力有限，模块可能（绝对）有bug，也可能更新不及时，有能力的兄弟有空可以帮忙维护一下代码，本项目由deepseekv4flash开发。
 
 ## 功能
+<p align="center">
+  <img src="img/1.jpg" alt="预览1" width="45%">
+  <img src="img/2.jpg" alt="预览2" width="45%">
+</p>
 
 - **垃圾帖屏蔽**：命中词库的帖子可整行移除（REMOVE 模式）或保留头像/用户名、正文替换为"已屏蔽"占位（MARK 模式）。
 - **只在对话/详情页处理**：主页时间线完全不扫描（entryId 以 `conversationthread-` 开头才进入匹配），保证主页滚动零开销。
