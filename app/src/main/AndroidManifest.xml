@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:name=".XAdApplication"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.XADBlock">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".data.HookBridgeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.xadblock.module.ACTION_BLOCK_EVENTS" />
+                <action android:name="com.xadblock.module.ACTION_HEARTBEAT" />
+            </intent-filter>
+        </receiver>
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="X-ADBlock：屏蔽 X 平台中文区黄色广告/垃圾机器人（词库可云端同步）" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+        <meta-data
+            android:name="xposedscope"
+            android:value="com.twitter.android" />
+    </application>
+
+</manifest>

@@ -1,0 +1,29 @@
+# Gradle
+.gradle/
+build/
+local.properties
+keystore.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Signing / secrets
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+
+# Logs
+*.log
+
+# APKs / artifacts
+*.apk
+*.apks
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
