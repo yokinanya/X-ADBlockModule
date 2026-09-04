@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">X-ADBlock</string>
+    <string name="module_description">屏蔽 X 平台中文区黄色广告与垃圾机器人，支持词库云端同步。</string>
 </resources>

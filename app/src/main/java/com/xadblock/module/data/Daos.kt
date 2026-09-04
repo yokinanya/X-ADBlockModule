@@ -8,6 +8,8 @@ import androidx.room.Query
 import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
+const val BLOCK_EVENT_HISTORY_LIMIT = 500
+
 @Dao
 interface SubscriptionDao {
     @Query("SELECT * FROM subscriptions ORDER BY id")
@@ -34,6 +36,9 @@ interface SubscriptionDao {
 
 @Dao
 interface RuleDao {
+    @Query("SELECT * FROM rules ORDER BY sourceId, priority, id")
+    fun allFlow(): Flow<List<RuleEntity>>
+
     @Query("SELECT * FROM rules WHERE enabled=1 ORDER BY priority, id")
     fun allEnabled(): List<RuleEntity>
 
@@ -73,14 +78,35 @@ interface RuleDao {
 
 @Dao
 interface BlockEventDao {
-    @Query("SELECT * FROM block_events ORDER BY id DESC LIMIT :limit")
+    @Query(
+        """SELECT * FROM block_events
+           WHERE postId IS NULL OR id IN (
+               SELECT MAX(id) FROM block_events WHERE postId IS NOT NULL GROUP BY postId
+           )
+           ORDER BY id DESC LIMIT :limit"""
+    )
+    fun all(limit: Int): Flow<List<BlockEventEntity>>
+
+    @Query(
+        """SELECT * FROM block_events
+           WHERE postId IS NULL OR id IN (
+               SELECT MAX(id) FROM block_events WHERE postId IS NOT NULL GROUP BY postId
+           )
+           ORDER BY id DESC LIMIT :limit"""
+    )
     fun recent(limit: Int): Flow<List<BlockEventEntity>>
 
     @Insert
     fun insert(entity: BlockEventEntity)
 
-    @Query("DELETE FROM block_events WHERE id NOT IN (SELECT id FROM block_events ORDER BY id DESC LIMIT 2000)")
-    fun trim()
+    @Query("SELECT EXISTS(SELECT 1 FROM block_events WHERE postId=:postId LIMIT 1)")
+    fun containsPost(postId: String): Boolean
+
+    @Query("DELETE FROM block_events WHERE postId IS NOT NULL AND id NOT IN (SELECT MAX(id) FROM block_events WHERE postId IS NOT NULL GROUP BY postId)")
+    fun removeDuplicatePosts()
+
+    @Query("DELETE FROM block_events WHERE id NOT IN (SELECT id FROM block_events ORDER BY id DESC LIMIT :keep)")
+    fun trim(keep: Int)
 
     @Query("DELETE FROM block_events")
     fun clear()
