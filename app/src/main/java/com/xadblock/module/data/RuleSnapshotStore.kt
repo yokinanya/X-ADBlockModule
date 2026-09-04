@@ -26,10 +26,9 @@ object RuleSnapshotStore {
                 }
             }
         }
-        val data = sb.toString()
-        val version = fingerprint(data)
-
         val settings = SettingsStore.load(context)
+        val data = sb.toString()
+        val version = fingerprint(data, settings)
         val prefs = XAdApplication.remotePreferences(Contract.PREF_SNAPSHOT)
         check(prefs.edit()
             .putString(Contract.KEY_SNAPSHOT_DATA, data)
@@ -39,14 +38,28 @@ object RuleSnapshotStore {
             .putBoolean(Contract.KEY_OPT_EMOJI, settings.optEmoji)
             .putBoolean(Contract.KEY_OPT_SPECIAL_CHARS, settings.optSpecialChars)
             .putBoolean(Contract.KEY_OPT_GROK, settings.optGrok)
+            .putBoolean(Contract.KEY_SKIP_VERIFIED, settings.skipVerified)
+            .putStringSet(Contract.KEY_WHITELIST_USERS, settings.whitelistUsers)
             .putString(Contract.KEY_MARK_TEXT, settings.markText)
             .commit()) {
             "Remote Preferences 提交失败"
         }
     }
 
-    private fun fingerprint(data: String): Long {
-        val digest = MessageDigest.getInstance("MD5").digest(data.toByteArray(Charsets.UTF_8))
+    private fun fingerprint(data: String, settings: SettingsStore.Settings): Long {
+        val canonicalSettings = buildString {
+            append(settings.displayMode).append('|')
+            append(settings.optUsername).append('|')
+            append(settings.optEmoji).append('|')
+            append(settings.optSpecialChars).append('|')
+            append(settings.optGrok).append('|')
+            append(settings.skipVerified).append('|')
+            append(settings.markText).append('|')
+            settings.whitelistUsers.sorted().forEach { append(it).append('|') }
+        }
+        val digestInput = data + '\u0000' + canonicalSettings
+        val digest = MessageDigest.getInstance("MD5")
+            .digest(digestInput.toByteArray(Charsets.UTF_8))
         var hash = 0L
         for (i in 0 until 8) {
             hash = (hash shl 8) or (digest[i].toLong() and 0xFF)

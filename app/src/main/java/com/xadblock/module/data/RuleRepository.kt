@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.regex.Pattern
 
 /** Orchestrates subscription syncs and local-rule management on top of Room. */
 class RuleRepository(private val context: Context) {
@@ -94,6 +95,47 @@ class RuleRepository(private val context: Context) {
             RuleSnapshotStore.rebuild(context)
         }
         return Result.success(specs.size)
+    }
+
+    suspend fun addLocalRule(kind: String, text: String): Result<Unit> {
+        val normalized = KeywordsParser.stripInvisible(text.trim())
+        if (normalized.isBlank()) return Result.failure(IOException("请输入有效规则"))
+        val pattern = when (kind) {
+            Contract.KIND_LITERAL -> normalized
+            Contract.KIND_REGEX -> KeywordsParser.parseLine(normalized)
+                ?.takeIf { it.kind == Contract.KIND_REGEX }
+                ?.pattern
+                ?: normalized
+            else -> return Result.failure(IOException("不支持的规则类型"))
+        }
+        if (kind == Contract.KIND_REGEX) {
+            try {
+                Pattern.compile(pattern)
+            } catch (failure: Throwable) {
+                return Result.failure(IOException("正则表达式无效", failure))
+            }
+        }
+        return runCatching {
+            withContext(Dispatchers.IO) {
+                dao.insert(
+                    RuleEntity(
+                        sourceId = "local",
+                        kind = kind,
+                        pattern = pattern,
+                        priority = 90
+                    )
+                )
+                RuleSnapshotStore.rebuild(context)
+            }
+        }
+    }
+
+    suspend fun deleteLocalRule(rule: RuleEntity) {
+        require(rule.sourceId == "local") { "只能删除本地规则" }
+        withContext(Dispatchers.IO) {
+            dao.delete(rule.id)
+            RuleSnapshotStore.rebuild(context)
+        }
     }
 
     suspend fun exportLocalText(): String {

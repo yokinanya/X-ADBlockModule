@@ -3,12 +3,15 @@ package com.xadblock.module.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.withTransaction
 import com.xadblock.module.XAdApplication
 import com.xadblock.module.XposedServiceState
 import com.xadblock.module.data.AppDatabase
+import com.xadblock.module.data.BLOCK_EVENT_HISTORY_LIMIT
 import com.xadblock.module.data.BlockEventEntity
 import com.xadblock.module.data.HeartbeatEntity
 import com.xadblock.module.data.RuleRepository
+import com.xadblock.module.data.RuleEntity
 import com.xadblock.module.data.RuleSnapshotStore
 import com.xadblock.module.data.SettingsStore
 import com.xadblock.module.data.SubscriptionEntity
@@ -29,13 +32,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val subscriptions: StateFlow<List<SubscriptionEntity>> = db.subscriptionDao().all()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val rules: StateFlow<List<RuleEntity>> = db.ruleDao().allFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val heartbeat: StateFlow<HeartbeatEntity?> = db.heartbeatDao().latest()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    val recentBlocks: StateFlow<List<BlockEventEntity>> = db.blockEventDao().recent(100)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val allHistory: StateFlow<List<BlockEventEntity>> = db.blockEventDao().recent(2000)
+    val allHistory: StateFlow<List<BlockEventEntity>> = db.blockEventDao()
+        .all(BLOCK_EVENT_HISTORY_LIMIT)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _localCount = MutableStateFlow(0)
@@ -58,6 +62,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     data class UiMessage(val text: String, val isError: Boolean)
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.blockEventDao().trim(BLOCK_EVENT_HISTORY_LIMIT)
+        }
         viewModelScope.launch {
             db.ruleDao().allEnabledFlow().collect { rules ->
                 _localCount.value = rules.count { it.sourceId == "local" }
@@ -76,16 +83,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addSubscription(name: String, url: String, secondaryUrl: String) {
-        if (url.isBlank()) return
+        val normalizedUrl = url.trim()
+        if (!normalizedUrl.startsWith("https://")) {
+            _message.value = UiMessage("订阅地址必须使用 HTTPS", true)
+            return
+        }
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                db.subscriptionDao().upsert(
-                    SubscriptionEntity(
-                        name = name.ifBlank { url },
-                        url = url.trim(),
-                        secondaryUrl = secondaryUrl.trim().ifBlank { null }
+            try {
+                withContext(Dispatchers.IO) {
+                    db.subscriptionDao().upsert(
+                        SubscriptionEntity(
+                            name = name.ifBlank { normalizedUrl },
+                            url = normalizedUrl,
+                            secondaryUrl = secondaryUrl.trim().ifBlank { null }
+                        )
                     )
-                )
+                }
+                _message.value = UiMessage("云端规则已添加", false)
+            } catch (failure: Throwable) {
+                reportFailure("添加订阅失败", failure)
+            }
+        }
+    }
+
+    fun updateSubscription(updated: SubscriptionEntity) {
+        if (!updated.url.startsWith("https://")) {
+            _message.value = UiMessage("订阅地址必须使用 HTTPS", true)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val current = db.subscriptionDao().allOnce().first { it.id == updated.id }
+                    val changed = current.url != updated.url || current.secondaryUrl != updated.secondaryUrl
+                    val saved = if (changed) {
+                        updated.copy(ruleCount = 0, lastSyncStatus = "", etag = "")
+                    } else {
+                        updated
+                    }
+                    db.withTransaction {
+                        db.subscriptionDao().upsert(saved)
+                        if (changed) db.ruleDao().deleteBySource("sub:${updated.id}")
+                    }
+                    if (changed) RuleSnapshotStore.rebuild(getApplication())
+                    changed
+                }
+                _message.value = UiMessage("订阅已更新", false)
+            } catch (failure: Throwable) {
+                reportFailure("更新订阅失败", failure)
             }
         }
     }
@@ -172,6 +217,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun addLocalRule(kind: String, text: String) {
+        viewModelScope.launch {
+            repository.addLocalRule(kind, text).fold(
+                onSuccess = { _message.value = UiMessage("本地规则已添加", false) },
+                onFailure = { reportFailure("添加规则失败", it) }
+            )
+        }
+    }
+
+    fun deleteLocalRule(rule: RuleEntity) {
+        viewModelScope.launch {
+            try {
+                repository.deleteLocalRule(rule)
+                _message.value = UiMessage("本地规则已删除", false)
+            } catch (failure: Throwable) {
+                reportFailure("删除规则失败", failure)
+            }
+        }
+    }
+
     fun removeLocalRules() {
         viewModelScope.launch {
             try {
@@ -186,33 +251,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun clearHistory() {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { db.blockEventDao().clear() }
+                _message.value = UiMessage("过滤历史已清空", false)
+            } catch (failure: Throwable) {
+                reportFailure("清空过滤历史失败", failure)
+            }
+        }
+    }
+
+    fun addWhitelistUser(user: String) {
+        val value = user.trim()
+        if (value.isBlank()) {
+            _message.value = UiMessage("用户名不能为空", true)
+            return
+        }
+        val handles = value.split(Regex("\\s+"))
+            .filter { it.startsWith("@") }
+            .toSet()
+        val entries = if (handles.isEmpty()) setOf(value) else handles
+        val current = _settings.value.whitelistUsers
+        val merged = current + entries
+        if (merged == current) {
+            _message.value = UiMessage("用户已在白名单中", false)
+            return
+        }
+        persistSettings(
+            _settings.value.copy(whitelistUsers = merged),
+            "用户白名单已更新"
+        )
+    }
+
+    fun removeWhitelistUser(user: String) {
+        val remaining = _settings.value.whitelistUsers - user
+        if (remaining == _settings.value.whitelistUsers) return
+        persistSettings(
+            _settings.value.copy(whitelistUsers = remaining),
+            "用户白名单已更新"
+        )
+    }
+
     fun setEnqueueBackgroundSync(intervalHours: Long) {
         SyncWorker.schedulePeriodic(getApplication(), intervalHours)
     }
 
     fun updateSettings(newSettings: SettingsStore.Settings) {
+        persistSettings(newSettings, "过滤设置已更新")
+    }
+
+    private fun persistSettings(
+        newSettings: SettingsStore.Settings,
+        successMessage: String
+    ) {
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
                     SettingsStore.save(getApplication(), newSettings)
                 }
                 _settings.value = newSettings
-                _message.value = UiMessage("过滤设置已更新", false)
+                _message.value = UiMessage(successMessage, false)
             } catch (failure: Throwable) {
                 reportFailure("设置保存失败", failure)
-            }
-        }
-    }
-
-    fun clearHistory() {
-        viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    db.blockEventDao().clear()
-                }
-                _message.value = UiMessage("屏蔽历史已清空", false)
-            } catch (failure: Throwable) {
-                reportFailure("清空历史失败", failure)
             }
         }
     }

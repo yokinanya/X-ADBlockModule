@@ -4,7 +4,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.res.AssetManager;
 import android.content.SharedPreferences;
-import android.os.Bundle;
 
 import com.xadblock.module.data.Contract;
 
@@ -15,12 +14,13 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
@@ -39,7 +39,7 @@ public final class RuleBridge {
     private static final long HEARTBEAT_INTERVAL_MS = 120_000L;
     private static final long EVENT_FLUSH_MS = 4_000L;
     private static final int MAX_EVENT_BATCH = 20;
-    private static final int MAX_PENDING_EVENTS = 20;
+    private static final int MAX_RECORDED_ENTRY_IDS = 10_000;
 
     private static final AtomicReference<Snapshot> ACTIVE = new AtomicReference<>();
     private static final AtomicBoolean BOOTSTRAPPED = new AtomicBoolean(false);
@@ -55,13 +55,10 @@ public final class RuleBridge {
     private static volatile boolean optUsername = true;
     private static volatile boolean optEmoji = true;
     private static volatile boolean optSpecialChars = true;
-    private static volatile boolean optGrok = true;
-    private static volatile String markText = "已屏蔽";
-
-    // x-comment-blocker parity: emoji/symbol detection patterns.
-    private static final Pattern EMOJI_PATTERN = Pattern.compile(
-            "[\\uD83C-\\uD83E]|[\\uD83C-\\uD83E][\\uDC00-\\uDFFF]|"
-                    + "[\\u2600-\\u27BF]|[\\u2B00-\\u2BFF]|\\uFE0F|\\u3030|\\u303D");
+    private static volatile boolean optGrok = false;
+    private static volatile boolean skipVerified = false;
+    private static volatile java.util.Set<String> whitelistUsers = Collections.emptySet();
+    private static volatile String markText = "[已拦截]";
 
     static int getDisplayMode() {
         return displayMode;
@@ -72,7 +69,8 @@ public final class RuleBridge {
     }
 
     private static final AtomicLong STAT_TOTAL = new AtomicLong();
-    private static final AtomicInteger PENDING_EVENTS = new AtomicInteger();
+    private static volatile android.os.Handler MAIN_HANDLER;
+    private static final Runnable FLUSH_RUNNABLE = RuleBridge::flushEvents;
 
     private static final ExecutorService IO = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "xadblock-bridge");
@@ -80,18 +78,24 @@ public final class RuleBridge {
         return thread;
     });
 
-    /** entryId -> Match (or NULL_MARKER) for the active snapshot; cleared on reload. */
-    private static final java.util.Map<String, Object> EVAL_CACHE =
+    /** entryId -> Match for the active snapshot; cleared on reload. */
+    private static final java.util.Map<String, Match> EVAL_CACHE =
             java.util.Collections.synchronizedMap(
-            new java.util.LinkedHashMap<String, Object>(4096, 0.75f, true) {
+            new java.util.LinkedHashMap<String, Match>(4096, 0.75f, true) {
                 @Override
-                protected boolean removeEldestEntry(java.util.Map.Entry<String, Object> eldest) {
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, Match> eldest) {
                     return size() > 8192;
                 }
             });
-    private static final Object NULL_MARKER = new Object();
-
     private static final List<PendingBlock> EVENT_QUEUE = Collections.synchronizedList(new ArrayList<>());
+    /** Entry IDs already counted and queued during this X process lifetime. */
+    private static final Map<String, Boolean> RECORDED_ENTRY_IDS =
+            Collections.synchronizedMap(new LinkedHashMap<String, Boolean>(4096, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+                    return size() > MAX_RECORDED_ENTRY_IDS;
+                }
+            });
     private static volatile long lastEventFlushAt;
 
     private RuleBridge() {}
@@ -107,8 +111,7 @@ public final class RuleBridge {
         try {
             snapshotPrefs = HookEntry.remotePreferences(Contract.PREF_SNAPSHOT);
             snapshotListener = (preferences, key) -> {
-                if (key == null || Contract.KEY_SNAPSHOT_VERSION.equals(key)
-                        || Contract.KEY_SNAPSHOT_DATA.equals(key)) {
+                if (key == null || isSnapshotSettingKey(key)) {
                     IO.execute(() -> reloadIfChanged(true));
                 }
             };
@@ -120,8 +123,9 @@ public final class RuleBridge {
         reloadIfChanged(true);
         lastHeartbeatStatus = "ACTIVE";
         android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        MAIN_HANDLER = mainHandler;
         mainHandler.postDelayed(RuleBridge::sendPeriodicHeartbeat, HEARTBEAT_INTERVAL_MS);
-        mainHandler.postDelayed(RuleBridge::flushEvents, EVENT_FLUSH_MS);
+        mainHandler.postDelayed(FLUSH_RUNNABLE, EVENT_FLUSH_MS);
         sendHeartbeat("ACTIVE");
         HookEntry.log("bridge initialized: snapshotVersion=" + lastSnapshotVersion);
     }
@@ -137,8 +141,13 @@ public final class RuleBridge {
         targetContext = null;
         ACTIVE.set(null);
         EVAL_CACHE.clear();
+        RECORDED_ENTRY_IDS.clear();
         EVENT_QUEUE.clear();
-        PENDING_EVENTS.set(0);
+        android.os.Handler handler = MAIN_HANDLER;
+        MAIN_HANDLER = null;
+        if (handler != null) {
+            handler.removeCallbacks(FLUSH_RUNNABLE);
+        }
         STAT_TOTAL.set(0);
         BOOTSTRAPPED.set(false);
         INITIALIZED.set(false);
@@ -159,17 +168,18 @@ public final class RuleBridge {
                 return;
             }
             String data = prefs.getString(Contract.KEY_SNAPSHOT_DATA, "");
+            loadOptions(prefs);
+            TimelineFilter.invalidateMatches();
+            EVAL_CACHE.clear();
             if (data == null || data.isEmpty() || version <= 0) {
                 return;
             }
-            loadOptions(prefs);
             List<Rule> rules = compileSnapshot(data);
             if (rules.isEmpty()) {
                 return;
             }
             ACTIVE.set(new Snapshot(version, Collections.unmodifiableList(rules),
                     "module-snapshot"));
-            EVAL_CACHE.clear();
             lastSnapshotVersion = version;
             HookEntry.log("activated module snapshot=" + version + " rules=" + rules.size()
                     + " mode=" + displayMode + " opt(U/E/S/G)=" + optUsername + "/" + optEmoji
@@ -185,12 +195,36 @@ public final class RuleBridge {
             optUsername = prefs.getBoolean(Contract.KEY_OPT_USERNAME, true);
             optEmoji = prefs.getBoolean(Contract.KEY_OPT_EMOJI, true);
             optSpecialChars = prefs.getBoolean(Contract.KEY_OPT_SPECIAL_CHARS, true);
-            optGrok = prefs.getBoolean(Contract.KEY_OPT_GROK, true);
-            String text = prefs.getString(Contract.KEY_MARK_TEXT, "已屏蔽");
-            markText = (text == null || text.isEmpty()) ? "已屏蔽" : text;
+            optGrok = prefs.getBoolean(Contract.KEY_OPT_GROK, false);
+            skipVerified = prefs.getBoolean(Contract.KEY_SKIP_VERIFIED, false);
+            java.util.Set<String> configuredUsers = prefs.getStringSet(
+                    Contract.KEY_WHITELIST_USERS, Collections.emptySet());
+            java.util.HashSet<String> normalizedUsers = new java.util.HashSet<>();
+            if (configuredUsers != null) {
+                for (String user : configuredUsers) {
+                    if (user == null || user.trim().isEmpty()) continue;
+                    normalizedUsers.add(normalizeForMatch(user));
+                }
+            }
+            whitelistUsers = Collections.unmodifiableSet(normalizedUsers);
+            String text = prefs.getString(Contract.KEY_MARK_TEXT, "[已拦截]");
+            markText = (text == null || text.isEmpty() || "已屏蔽".equals(text)) ? "[已拦截]" : text;
         } catch (Throwable ignored) {
             // keep previous values on parse hiccup
         }
+    }
+
+    private static boolean isSnapshotSettingKey(String key) {
+        return Contract.KEY_SNAPSHOT_VERSION.equals(key)
+                || Contract.KEY_SNAPSHOT_DATA.equals(key)
+                || Contract.KEY_DISPLAY_MODE.equals(key)
+                || Contract.KEY_OPT_USERNAME.equals(key)
+                || Contract.KEY_OPT_EMOJI.equals(key)
+                || Contract.KEY_OPT_SPECIAL_CHARS.equals(key)
+                || Contract.KEY_OPT_GROK.equals(key)
+                || Contract.KEY_SKIP_VERIFIED.equals(key)
+                || Contract.KEY_WHITELIST_USERS.equals(key)
+                || Contract.KEY_MARK_TEXT.equals(key);
     }
 
     private static List<Rule> compileSnapshot(String data) {
@@ -266,8 +300,12 @@ public final class RuleBridge {
             return null;
         }
         Snapshot snapshot = ACTIVE.get();
-        if (snapshot == null || snapshot.rules.isEmpty()) {
+        if (snapshot == null) {
             return null;
+        }
+        if ((optEmoji && isEmojiOnly(text))
+                || (optSpecialChars && hasSuspiciousSpecialChars(text))) {
+            return markText;
         }
         String normalized = normalizeForMatch(text);
         for (Rule rule : snapshot.rules) {
@@ -280,68 +318,112 @@ public final class RuleBridge {
     }
 
     static Match firstMatch(String postText, String postUrl, String authorText, String entryId,
-                            boolean isGrok) {
+                            boolean isGrok, boolean isVerified) {
         ensureBootstrap();
+        if ((isVerified && skipVerified) || isWhitelisted(authorText)) {
+            return null;
+        }
         if (entryId != null && !entryId.isEmpty()) {
-            Object cached = EVAL_CACHE.get(entryId);
-            if (cached == NULL_MARKER) {
-                return null;
-            }
-            if (cached instanceof Match) {
-                return (Match) cached;
+            Match cached = EVAL_CACHE.get(entryId);
+            if (cached != null) {
+                return cached;
             }
         }
         Snapshot snapshot = ACTIVE.get();
         if (snapshot == null) {
             return null;
         }
-        Match result = null;
-        StringBuilder sb = new StringBuilder();
-        if (postText != null) sb.append(postText);
-        sb.append('\n');
-        if (postUrl != null) sb.append(postUrl);
-        if (optUsername && authorText != null) sb.append('\n').append(authorText);
-        String combined = sb.toString();
-        String normalized = normalizeForMatch(combined);
-
-        // x-comment-blocker parity options (checked before keyword rules).
-        if (!combined.isEmpty()) {
-            if (optGrok && isGrok) {
-                result = new Match(null, "grok", snapshot.version, entryId);
-            } else if (optEmoji && EMOJI_PATTERN.matcher(combined).find()) {
-                result = new Match(null, "emoji", snapshot.version, entryId);
-            } else if (optSpecialChars && hasSuspiciousSpecialChars(combined)) {
-                result = new Match(null, "special-chars", snapshot.version, entryId);
-            }
-        }
+        String combined = combine(postText, postUrl, optUsername ? authorText : null);
+        Match result = automaticMatch(postText, snapshot.version, entryId, isGrok);
         if (result == null) {
-            Rule ahoRule = snapshot.aho.scan(normalized);
-            if (ahoRule != null) {
-                result = new Match(ahoRule, ahoRule.pattern, snapshot.version, entryId);
-            }
-        }
-        if (result == null) {
-            for (Rule rule : snapshot.allOfRules) {
-                String matched = rule.match(combined, normalized);
-                if (matched != null) {
-                    result = new Match(rule, matched, snapshot.version, entryId);
-                    break;
-                }
-            }
-        }
-        if (result == null) {
-            for (Rule rule : snapshot.regexRules) {
-                String matched = rule.match(combined, normalized);
-                if (matched != null) {
-                    result = new Match(rule, matched, snapshot.version, entryId);
-                    break;
-                }
-            }
+            result = ruleMatch(snapshot, combined, snapshot.version, entryId);
         }
         if (entryId != null && !entryId.isEmpty()) {
-            EVAL_CACHE.put(entryId, result == null ? NULL_MARKER : result);
+            if (result == null) {
+                EVAL_CACHE.remove(entryId);
+            } else {
+                EVAL_CACHE.put(entryId, result);
+            }
         }
         return result;
+    }
+
+    static Match firstMatch(String postText, String postUrl, String authorText, String entryId,
+                            boolean isGrok) {
+        return firstMatch(postText, postUrl, authorText, entryId, isGrok, false);
+    }
+
+    private static boolean isWhitelisted(String authorText) {
+        if (authorText == null || authorText.trim().isEmpty() || whitelistUsers.isEmpty()) {
+            return false;
+        }
+        if (containsWhitelistValue(authorText)) {
+            return true;
+        }
+        for (String token : authorText.split("\\s+")) {
+            if (containsWhitelistValue(token)) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsWhitelistValue(String value) {
+        String normalized = normalizeForMatch(value);
+        if (normalized.isEmpty()) return false;
+        if (whitelistUsers.contains(normalized)) return true;
+        String withoutAt = normalized.startsWith("@") ? normalized.substring(1) : normalized;
+        String withAt = normalized.startsWith("@") ? normalized : "@" + normalized;
+        return whitelistUsers.contains(withoutAt) || whitelistUsers.contains(withAt);
+    }
+
+    private static String combine(String postText, String postUrl, String authorText) {
+        StringBuilder builder = new StringBuilder();
+        appendPart(builder, postText);
+        appendPart(builder, postUrl);
+        appendPart(builder, authorText);
+        return builder.toString();
+    }
+
+    private static void appendPart(StringBuilder builder, String value) {
+        if (value == null || value.isEmpty()) return;
+        if (builder.length() > 0) builder.append('\n');
+        builder.append(value);
+    }
+
+    private static Match automaticMatch(String postText, long version, String entryId,
+                                        boolean isGrok) {
+        if (optGrok && isGrok) {
+            return new Match(null, "grok", version, entryId);
+        }
+        if (postText == null || postText.isEmpty()) return null;
+        if (optEmoji && isEmojiOnly(postText)) {
+            return new Match(null, "emoji", version, entryId);
+        }
+        if (optSpecialChars && hasSuspiciousSpecialChars(postText)) {
+            return new Match(null, "special-chars", version, entryId);
+        }
+        return null;
+    }
+
+    private static Match ruleMatch(Snapshot snapshot, String original, long version,
+                                   String entryId) {
+        String normalized = normalizeForMatch(original);
+        Rule ahoRule = snapshot.aho.scan(normalized);
+        if (ahoRule != null) {
+            return new Match(ahoRule, ahoRule.pattern, version, entryId);
+        }
+        for (Rule rule : snapshot.allOfRules) {
+            String matched = rule.match(original, normalized);
+            if (matched != null) {
+                return new Match(rule, matched, version, entryId);
+            }
+        }
+        for (Rule rule : snapshot.regexRules) {
+            String matched = rule.match(original, normalized);
+            if (matched != null) {
+                return new Match(rule, matched, version, entryId);
+            }
+        }
+        return null;
     }
 
     /** Heuristic for "充满特殊符号/乱码" posts: symbols, control chars and private-use
@@ -353,6 +435,10 @@ public final class RuleBridge {
             int codePoint = text.codePointAt(offset);
             offset += Character.charCount(codePoint);
             if (Character.isWhitespace(codePoint)) {
+                continue;
+            }
+            if (isEmojiCodePoint(codePoint) || codePoint == 0xFE0F
+                    || codePoint == 0x200D || codePoint == 0x20E3) {
                 continue;
             }
             total++;
@@ -373,26 +459,123 @@ public final class RuleBridge {
         return total >= 3 && suspicious * 100 >= total * 25;
     }
 
+    /** Returns true only when every non-whitespace code point belongs to an emoji sequence. */
+    private static boolean isEmojiOnly(String text) {
+        if (text == null || text.isEmpty()) return false;
+        boolean hasEmoji = false;
+        for (int offset = 0; offset < text.length(); ) {
+            int codePoint = text.codePointAt(offset);
+            int nextOffset = offset + Character.charCount(codePoint);
+            if (Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint)) {
+                offset = nextOffset;
+                continue;
+            }
+            if (isEmojiCodePoint(codePoint)) {
+                hasEmoji = true;
+                offset = nextOffset;
+                continue;
+            }
+            if (codePoint == 0xFE0F || codePoint == 0x200D || codePoint == 0x20E3) {
+                if (!hasEmoji) return false;
+                offset = nextOffset;
+                continue;
+            }
+            if (isKeycapBase(codePoint)) {
+                int keycapEnd = keycapEnd(text, offset);
+                if (keycapEnd > nextOffset) {
+                    hasEmoji = true;
+                    offset = keycapEnd;
+                    continue;
+                }
+            }
+            return false;
+        }
+        return hasEmoji;
+    }
+
+    private static boolean isKeycapBase(int codePoint) {
+        return codePoint >= '0' && codePoint <= '9'
+                || codePoint == '#' || codePoint == '*';
+    }
+
+    private static int keycapEnd(String text, int offset) {
+        int end = offset + Character.charCount(text.codePointAt(offset));
+        if (end < text.length() && text.codePointAt(end) == 0xFE0F) {
+            end += Character.charCount(text.codePointAt(end));
+        }
+        if (end < text.length() && text.codePointAt(end) == 0x20E3) {
+            return end + Character.charCount(text.codePointAt(end));
+        }
+        return offset + Character.charCount(text.codePointAt(offset));
+    }
+
+    /** Detects emoji code points without treating every supplementary character as emoji. */
+    private static boolean isEmojiCodePoint(int codePoint) {
+        return codePoint >= 0x1F000 && codePoint <= 0x1FAFF
+                || codePoint >= 0x2600 && codePoint <= 0x27BF
+                || codePoint == 0x00A9 || codePoint == 0x00AE
+                || codePoint == 0x203C || codePoint == 0x2049
+                || codePoint == 0x2122 || codePoint == 0x2139
+                || codePoint >= 0x2194 && codePoint <= 0x2199
+                || codePoint >= 0x21A9 && codePoint <= 0x21AA
+                || codePoint >= 0x231A && codePoint <= 0x231B
+                || codePoint == 0x2328 || codePoint == 0x23CF
+                || codePoint >= 0x23E9 && codePoint <= 0x23F3
+                || codePoint >= 0x23F8 && codePoint <= 0x23FA
+                || codePoint == 0x24C2
+                || codePoint >= 0x25AA && codePoint <= 0x25AB
+                || codePoint == 0x25B6 || codePoint == 0x25C0
+                || codePoint >= 0x25FB && codePoint <= 0x25FE
+                || codePoint >= 0x2B05 && codePoint <= 0x2B07
+                || codePoint >= 0x2B1B && codePoint <= 0x2B1C
+                || codePoint == 0x2B50 || codePoint == 0x2B55
+                || codePoint >= 0x2934 && codePoint <= 0x2935
+                || codePoint == 0x3030 || codePoint == 0x303D
+                || codePoint == 0x3297 || codePoint == 0x3299;
+    }
+
     static long getTotalBlocks() {
         return STAT_TOTAL.get();
     }
 
-    static void recordBlock(Match match, String postText) {
+    static void recordBlock(Match match, String postText, String postUrl, String authorText) {
         if (match == null) return;
+        if (wasAlreadyRecorded(match.entryId)) return;
         STAT_TOTAL.incrementAndGet();
-        String matchedRule = match.rule == null
-                ? match.matchedText
-                : match.rule.pattern;
+        String sourceId = match.rule == null ? match.matchedText : match.rule.sourceId;
+        String matchedRule = match.rule == null ? "" : preview(match.rule.pattern, 160);
         EVENT_QUEUE.add(new PendingBlock(
-                match.rule == null ? "?" : match.rule.sourceId,
-                "[匹配:" + matchedRule + "] " + preview(postText, 160),
+                preview(sourceId, 80),
+                matchedRule,
+                historyPreview(postText, postUrl, authorText),
+                preview(authorText, 160),
                 match.entryId));
         if (EVENT_QUEUE.size() >= MAX_EVENT_BATCH) {
+            android.os.Handler handler = MAIN_HANDLER;
+            if (handler != null) handler.removeCallbacks(FLUSH_RUNNABLE);
             flushEvents();
         }
     }
 
+    private static boolean wasAlreadyRecorded(String entryId) {
+        if (entryId == null || entryId.isEmpty()) return false;
+        synchronized (RECORDED_ENTRY_IDS) {
+            return RECORDED_ENTRY_IDS.put(entryId, Boolean.TRUE) != null;
+        }
+    }
+
+    private static String historyPreview(String postText, String postUrl, String authorText) {
+        if (postText != null && !postText.trim().isEmpty()) {
+            return preview(postText, 160);
+        }
+        if (authorText != null && !authorText.trim().isEmpty()) {
+            return preview("用户名: " + authorText, 160);
+        }
+        return preview(postUrl, 160);
+    }
+
     private static void flushEvents() {
+        scheduleNextFlush();
         if (EVENT_QUEUE.isEmpty()) {
             return;
         }
@@ -402,21 +585,21 @@ public final class RuleBridge {
             batch = new ArrayList<>(EVENT_QUEUE.subList(0, Math.min(EVENT_QUEUE.size(), MAX_EVENT_BATCH)));
             EVENT_QUEUE.subList(0, batch.size()).clear();
         }
-        if (batch.isEmpty() || PENDING_EVENTS.incrementAndGet() > MAX_PENDING_EVENTS) {
-            if (!batch.isEmpty()) PENDING_EVENTS.decrementAndGet();
+        if (batch.isEmpty()) {
             return;
         }
         IO.execute(() -> {
             try {
                 Context context = targetContext;
                 if (context == null) return;
-                Bundle extras = new Bundle();
                 final StringBuilder payload = new StringBuilder();
                 for (PendingBlock block : batch) {
                     if (payload.length() > 0) payload.append('\n');
                     payload.append(block.sourceId).append('\t')
                             .append(block.preview).append('\t')
-                            .append(block.postId == null ? "" : block.postId);
+                            .append(block.postId == null ? "" : block.postId).append('\t')
+                            .append(block.author).append('\t')
+                            .append(block.matchedRule);
                 }
                 Intent intent = new Intent(Contract.ACTION_BLOCK_EVENTS)
                         .setPackage(Contract.MODULE_PACKAGE)
@@ -425,10 +608,15 @@ public final class RuleBridge {
                 context.sendBroadcast(intent);
             } catch (Throwable throwable) {
                 HookEntry.log("failed to send block broadcast: " + throwable);
-            } finally {
-                PENDING_EVENTS.decrementAndGet();
             }
         });
+    }
+
+    private static void scheduleNextFlush() {
+        android.os.Handler handler = MAIN_HANDLER;
+        if (handler == null) return;
+        handler.removeCallbacks(FLUSH_RUNNABLE);
+        handler.postDelayed(FLUSH_RUNNABLE, EVENT_FLUSH_MS);
     }
 
     private static void sendHeartbeat(String status) {
@@ -484,10 +672,10 @@ public final class RuleBridge {
     }
 
     private static String preview(String text, int limit) {
-        if (text == null || text.isEmpty()) return text;
+        if (text == null || text.isEmpty()) return "";
         int count = text.codePointCount(0, text.length());
         int end = text.offsetByCodePoints(0, Math.min(count, limit));
-        return text.substring(0, end).replace('\n', ' ').replace('\r', ' ');
+        return text.substring(0, end).replace('\n', ' ').replace('\r', ' ').replace('\t', ' ');
     }
 
     static final class Match {
@@ -506,12 +694,17 @@ public final class RuleBridge {
 
     private static final class PendingBlock {
         final String sourceId;
+        final String matchedRule;
         final String preview;
+        final String author;
         final String postId;
 
-        PendingBlock(String sourceId, String preview, String postId) {
+        PendingBlock(String sourceId, String matchedRule, String preview, String author,
+                     String postId) {
             this.sourceId = sourceId;
+            this.matchedRule = matchedRule;
             this.preview = preview;
+            this.author = author;
             this.postId = postId;
         }
     }

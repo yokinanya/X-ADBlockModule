@@ -37,32 +37,32 @@ class HookBridgeReceiver : BroadcastReceiver() {
     }
 
     private fun handleBlockEvents(context: Context, intent: Intent) {
-        val count = intent.getIntExtra(Contract.EXTRA_COUNT, 0)
-        if (count > 0) {
-            XAdApplication.recordBlockCount(context, count.toLong())
-            ModuleLogger.log("block events received: $count")
-        }
         val payload = intent.getStringExtra(Contract.EXTRA_ITEMS) ?: return
         if (payload.isEmpty()) return
-        val db = AppDatabase.get(context)
-        payload.lineSequence().forEach { line ->
-            val parts = line.split('\t')
-            if (parts.size < 2) return@forEach
-            try {
-                db.blockEventDao().insert(
-                    BlockEventEntity(
-                        sourceId = parts[0],
-                        preview = parts[1].take(200),
-                        postId = parts.getOrNull(2)?.takeIf { it.isNotBlank() }
-                    )
-                )
-            } catch (ignored: Throwable) {
-            }
+        val dao = AppDatabase.get(context).blockEventDao()
+        dao.removeDuplicatePosts()
+        var inserted = 0L
+        payload.lineSequence().mapNotNull(::parseBlockEvent).forEach { event ->
+            if (event.postId != null && dao.containsPost(event.postId)) return@forEach
+            dao.insert(event)
+            inserted++
         }
-        try {
-            db.blockEventDao().trim()
-        } catch (ignored: Throwable) {
-        }
+        dao.trim(BLOCK_EVENT_HISTORY_LIMIT)
+        if (inserted == 0L) return
+        XAdApplication.recordBlockCount(context, inserted)
+        ModuleLogger.log("block events received: $inserted")
+    }
+
+    private fun parseBlockEvent(line: String): BlockEventEntity? {
+        val parts = line.split('\t')
+        if (parts.size < 2) return null
+        return BlockEventEntity(
+            sourceId = parts[0],
+            preview = parts[1].take(200),
+            postId = parts.getOrNull(2)?.takeIf(String::isNotBlank),
+            author = parts.getOrNull(3)?.takeIf(String::isNotBlank)?.take(200),
+            matchedRule = parts.getOrNull(4)?.takeIf(String::isNotBlank)?.take(200)
+        )
     }
 
     private fun handleHeartbeat(context: Context, intent: Intent) {

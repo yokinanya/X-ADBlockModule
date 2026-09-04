@@ -21,7 +21,7 @@ public final class Contract {
     public static final String KEY_SNAPSHOT_VERSION = "snapshot_version";
     public static final String KEY_SNAPSHOT_DATA = "snapshot_data";
 
-    /** Display mode: 0 = remove the post entirely, 1 = keep a "已屏蔽" placeholder. */
+    /** Display mode: 0 = remove the post entirely, 1 = keep a "[已拦截]" placeholder. */
     public static final String KEY_DISPLAY_MODE = "display_mode";
     public static final int DISPLAY_MODE_REMOVE = 0;
     public static final int DISPLAY_MODE_MARK = 1;
@@ -31,6 +31,8 @@ public final class Contract {
     public static final String KEY_OPT_EMOJI = "opt_emoji";
     public static final String KEY_OPT_SPECIAL_CHARS = "opt_special_chars";
     public static final String KEY_OPT_GROK = "opt_grok";
+    public static final String KEY_SKIP_VERIFIED = "skip_verified";
+    public static final String KEY_WHITELIST_USERS = "whitelist_users";
 
     /** Item placeholders carried by marked posts (preview text for the mark mode). */
     public static final String KEY_MARK_TEXT = "mark_text";

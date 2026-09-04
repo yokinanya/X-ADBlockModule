@@ -11,13 +11,14 @@
   <img src="img/2.jpg" alt="预览2" width="45%">
 </p>
 
-- **垃圾帖屏蔽**：命中词库的帖子可整行移除（REMOVE 模式）或保留头像/用户名、正文替换为"已屏蔽"占位（MARK 模式）。
+- **垃圾帖屏蔽**：命中词库的帖子可整行移除（REMOVE 模式）或保留头像/用户名、正文替换为"[已拦截]"占位（MARK 模式）。
 - **只在对话/详情页处理**：主页时间线完全不扫描（entryId 以 `conversationthread-` 开头才进入匹配），保证主页滚动零开销。
 - **词库云端同步**：默认订阅 [x-comment-blocker](https://github.com/amahteru/x-comment-blocker) 公共词库（GitHub raw + jsdelivr CDN 兜底，ETag/304 增量同步），支持多订阅增删、本地 TXT 导入。
 - **词库格式**：`#` 注释/分类头、`/regex/flags`、纯关键词（匹配时做零宽字符剥离、小写去空白）。
-- **过滤选项**：用户名、emoji、特殊字符、Grok 匹配开关；显示模式（占位/移除）可切换。
-- **屏蔽历史**：记录命中词条与原文，可在模块界面查看/清空。
-- **诊断日志**：`/sdcard/Download/xadblock_module.log`（模块 App 侧），hook 侧日志经心跳广播捎带；概览页显示 LibXposed 服务和目标进程心跳状态。
+- **过滤选项**：用户名、仅 Emoji 内容、特殊字符、Grok 匹配开关；支持跳过已认证账号，显示模式（占位/移除）可切换。
+- **用户白名单**：可在设置中维护，也可从过滤历史直接将发帖用户加入白名单。
+- **过滤历史**：记录命中词条、发帖用户、emoji 与异常符号等拦截事件，保留最近 500 条，可在模块界面查看/清空。
+- **诊断日志**：`/sdcard/Download/xadblock_module.log`（模块 App 侧），hook 侧日志经心跳广播捎带；首页运行状态仅显示本模块是否已在 LSPosed 中激活。
 
 ## 技术方案
 
@@ -55,7 +56,7 @@ app/build/outputs/apk/debug/app-debug.apk
 1. 安装支持 LibXposed API 102 的 [LSPosed](https://github.com/LSPosed/LSPosed)（需 Root）。
 2. 编译并安装本模块 APK，在 LSPosed 中启用模块，作用域勾选 `com.twitter.android`，重启。
 3. 打开模块 App：
-  - 「概览」：查看 LibXposed Service、Hook 心跳、快照版本和屏蔽统计。
+  - 「首页」：查看 LSPosed 模块激活状态、规则数量和屏蔽统计。
   - 「订阅」：管理云端订阅源，立即同步。
   - 「过滤」：显示模式（占位/移除）、匹配选项开关、Grok。
   - 「本地规则」：导入 TXT 或清空本地规则。

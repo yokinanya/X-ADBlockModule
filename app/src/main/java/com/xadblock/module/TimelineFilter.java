@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -84,9 +85,22 @@ final class TimelineFilter {
     private static volatile Method postEntryIdMethod;
     private static volatile Method postAuthorMethod;
     private static volatile Method postGrokMethod;
-    private static volatile Method authorNameMethod;
-    private static volatile Method authorHandleMethod;
-    private static volatile Method authorHandle2Method;
+    private static volatile Method authorVerifiedMethod;
+    private static volatile Method postResultAuthorMethod;
+    private static volatile java.lang.reflect.Field postResultAuthorField;
+    private static volatile Class<?> postResultAuthorClass;
+    private static volatile java.lang.reflect.Field POST_RESULT_FIELD;
+
+    private static final String[] AUTHOR_ACCESSOR_NAMES = {
+            "getUser", "getAuthor", "getAccount", "getUserResult", "getAuthorResult",
+            "user", "author", "account"
+    };
+    private static final String[] AUTHOR_HANDLE_NAMES = {
+            "C", "w", "getScreenName", "getHandle", "getUsername",
+            "getAccountName", "screenName", "handle", "username"
+    };
+    private static final Map<Class<?>, AuthorTextAccessors> AUTHOR_TEXT_ACCESSORS =
+            new ConcurrentHashMap<>();
 
     private TimelineFilter() {}
 
@@ -105,16 +119,27 @@ final class TimelineFilter {
         postEntryIdMethod = null;
         postAuthorMethod = null;
         postGrokMethod = null;
-        authorNameMethod = null;
-        authorHandleMethod = null;
-        authorHandle2Method = null;
+        authorVerifiedMethod = null;
+        postResultAuthorMethod = null;
+        postResultAuthorField = null;
+        postResultAuthorClass = null;
+        POST_RESULT_FIELD = null;
+        AUTHOR_TEXT_ACCESSORS.clear();
         i5RenderClass = null;
         i5InvokeMethod = null;
         I5_B5_FIELD = null;
         B5_ENTRY_ID_FIELD = null;
         B5_TEXT_FIELD = null;
         B5_RANGE_FIELD = null;
-        POST_RESULT_FIELD = null;
+    }
+
+    static void invalidateMatches() {
+        synchronized (EVALUATED_IDS) {
+            EVALUATED_IDS.clear();
+        }
+        BLOCKED_IDS.clear();
+        BLOCKED_POST_RESULTS.clear();
+        TEXT_MARK_CACHE.clear();
     }
 
     static void install(ClassLoader classLoader) throws Throwable {
@@ -126,9 +151,7 @@ final class TimelineFilter {
             postEntryIdMethod = accessors.entryId;
             postAuthorMethod = accessors.author;
             postGrokMethod = accessors.grok;
-            authorNameMethod = accessors.authorName;
-            authorHandleMethod = accessors.authorHandle;
-            authorHandle2Method = accessors.authorHandle2;
+            authorVerifiedMethod = accessors.authorVerified;
             timelineItemInterface = findClass(TIMELINE_ITEM_IF, classLoader);
 
             Class<?> uiEntryClass = findClass(UI_ENTRY, classLoader);
@@ -331,15 +354,16 @@ final class TimelineFilter {
                         String text = invokeString(item, postTextMethod);
                         String url = invokeString(item, postUrlMethod);
                         boolean isGrok = isGrokPost(item);
+                        boolean isVerified = isVerifiedPost(item);
                         String author = resolveAuthorText(item);
                         RuleBridge.Match match = RuleBridge.firstMatch(
-                                text, url, author, entryId, isGrok);
+                                text, url, author, entryId, isGrok, isVerified);
                         if (match != null) {
                             BLOCKED_IDS.put(entryId, RuleBridge.getMarkText());
                             rememberPostResult(item, RuleBridge.getMarkText());
                             diagHit(entryId + " " + (text == null
                                     ? "<null>" : text.substring(0, Math.min(32, text.length()))));
-                            RuleBridge.recordBlock(match, text);
+                            RuleBridge.recordBlock(match, text, url, author);
                         }
                     } catch (Throwable failure) {
                         HookEntry.log("post constructor inspection failed: " + failure);
@@ -369,21 +393,17 @@ final class TimelineFilter {
         final Method entryId;
         final Method author;
         final Method grok;
-        final Method authorName;
-        final Method authorHandle;
-        final Method authorHandle2;
+        final Method authorVerified;
 
         PostAccessors(Class<?> postClass, Method text, Method url, Method entryId, Method author,
-                      Method grok, Method authorName, Method authorHandle, Method authorHandle2) {
+                      Method grok, Method authorVerified) {
             this.postClass = postClass;
             this.text = text;
             this.url = url;
             this.entryId = entryId;
             this.author = author;
             this.grok = grok;
-            this.authorName = authorName;
-            this.authorHandle = authorHandle;
-            this.authorHandle2 = authorHandle2;
+            this.authorVerified = authorVerified;
         }
     }
 
@@ -401,19 +421,9 @@ final class TimelineFilter {
         // s5#i() -> author (hh), s5#p() -> grok reply marker.
         Method author = findNoArgMethod(postClass, "i");
         Method grok = findNoArgMethod(postClass, "p");
-        Method authorName = null;
-        Method authorHandle = null;
-        Method authorHandle2 = null;
-        if (author != null && author.getReturnType() != null) {
-            try {
-                authorName = findNoArgMethod(author.getReturnType(), "getName");
-                authorHandle = findNoArgMethod(author.getReturnType(), "C");
-                authorHandle2 = findNoArgMethod(author.getReturnType(), "w");
-            } catch (Throwable ignored) {
-            }
-        }
-        return new PostAccessors(postClass, text, url, entryId, author, grok,
-                authorName, authorHandle, authorHandle2);
+        Method authorVerified = author == null ? null
+                : findNoArgBooleanMethod(author.getReturnType(), "s");
+        return new PostAccessors(postClass, text, url, entryId, author, grok, authorVerified);
     }
 
     private static Method findNoArgMethod(Class<?> clazz, String name) {
@@ -422,6 +432,19 @@ final class TimelineFilter {
             if (method.getName().equals(name)
                     && method.getParameterTypes().length == 0
                     && Modifier.isPublic(method.getModifiers())) {
+                return method;
+            }
+        }
+        return null;
+    }
+
+    private static Method findNoArgBooleanMethod(Class<?> clazz, String name) {
+        if (clazz == null || name == null) return null;
+        for (Method method : clazz.getMethods()) {
+            if (method.getName().equals(name) && method.getParameterTypes().length == 0
+                    && (method.getReturnType() == boolean.class
+                    || method.getReturnType() == Boolean.class)) {
+                method.setAccessible(true);
                 return method;
             }
         }
@@ -769,9 +792,11 @@ final class TimelineFilter {
                 String url = invokeString(item, postUrlMethod);
                 String entryId = entryIdEarly;
                 boolean isGrok = isGrokPost(item);
+                boolean isVerified = isVerifiedPost(item);
                 String author = resolveAuthorText(item);
-                RuleBridge.Match match = RuleBridge.firstMatch(text, url, author, entryId, isGrok);
-                if (entryId != null) {
+                RuleBridge.Match match = RuleBridge.firstMatch(
+                        text, url, author, entryId, isGrok, isVerified);
+                if (entryId != null && hasEvaluationInput(text, url, author, isGrok)) {
                     EVALUATED_IDS.add(entryId);
                 }
                 if (match != null) {
@@ -779,9 +804,9 @@ final class TimelineFilter {
                     if (entryId != null) {
                         BLOCKED_IDS.put(entryId, RuleBridge.getMarkText());
                         rememberPostResult(item, RuleBridge.getMarkText());
-                        RuleBridge.recordBlock(match, text);
+                        RuleBridge.recordBlock(match, text, url, author);
                     } else {
-                        RuleBridge.recordBlock(match, text);
+                        RuleBridge.recordBlock(match, text, url, author);
                     }
                     continue;
                 }
@@ -806,23 +831,214 @@ final class TimelineFilter {
         return value != null;
     }
 
-    private static String resolveAuthorText(Object item) {
-        if (postAuthorMethod == null) return null;
+    private static boolean isVerifiedPost(Object item) {
         Object author = invokeValue(item, postAuthorMethod);
+        return Boolean.TRUE.equals(invokeValue(author, authorVerifiedMethod));
+    }
+
+    private static boolean hasEvaluationInput(String text, String url, String author,
+                                              boolean isGrok) {
+        return isGrok || hasText(text) || hasText(url) || hasText(author);
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isEmpty();
+    }
+
+    private static String resolveAuthorText(Object item) {
+        Object author = invokeValue(item, postAuthorMethod);
+        String postAuthor = authorObjectText(author);
+        if (postAuthor != null) return postAuthor;
+        return authorObjectText(resolvePostResultAuthor(item));
+    }
+
+    private static Object resolvePostResultAuthor(Object item) {
+        Object postResult = resolvePostResult(item);
+        if (postResult == null) return null;
+        Class<?> resultClass = postResult.getClass();
+        if (postResultAuthorClass != resultClass) {
+            postResultAuthorMethod = findAuthorObjectMethod(resultClass);
+            postResultAuthorField = findAuthorObjectField(resultClass);
+            postResultAuthorClass = resultClass;
+        }
+        Object author = invokeValue(postResult, postResultAuthorMethod);
+        if (author != null) return author;
+        if (postResultAuthorField != null) {
+            try {
+                author = postResultAuthorField.get(postResult);
+            } catch (Throwable ignored) {
+                author = null;
+            }
+            if (author != null) return author;
+        }
+        for (Method method : resultClass.getDeclaredMethods()) {
+            if (!isAuthorObjectMethod(method)) continue;
+            Object candidate = invokeValue(postResult, method);
+            if (candidate != null) {
+                postResultAuthorMethod = method;
+                return candidate;
+            }
+        }
+        for (java.lang.reflect.Field field : resultClass.getDeclaredFields()) {
+            String name = field.getName().toLowerCase(Locale.ROOT);
+            if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()
+                    || field.getType() == String.class || !isAuthorObjectName(name)) {
+                continue;
+            }
+            try {
+                field.setAccessible(true);
+                Object candidate = field.get(postResult);
+                if (candidate != null) {
+                    postResultAuthorField = field;
+                    return candidate;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        for (java.lang.reflect.Field field : resultClass.getDeclaredFields()) {
+            if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()
+                    || field.getType() == String.class) {
+                continue;
+            }
+            try {
+                field.setAccessible(true);
+                Object candidate = field.get(postResult);
+                if (authorObjectText(candidate) != null) {
+                    postResultAuthorField = field;
+                    return candidate;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static Object resolvePostResult(Object item) {
+        if (item == null) return null;
+        try {
+            java.lang.reflect.Field field = POST_RESULT_FIELD;
+            if (field == null || !field.getDeclaringClass().isInstance(item)) {
+                field = item.getClass().getDeclaredField("a");
+                field.setAccessible(true);
+                POST_RESULT_FIELD = field;
+            }
+            return field.get(item);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Method findAuthorObjectMethod(Class<?> type) {
+        for (String name : AUTHOR_ACCESSOR_NAMES) {
+            for (Method method : type.getDeclaredMethods()) {
+                if (method.getName().equals(name) && isAuthorObjectMethod(method)) {
+                    method.setAccessible(true);
+                    return method;
+                }
+            }
+        }
+        for (Method method : type.getMethods()) {
+            if (isAuthorObjectMethod(method)) return method;
+        }
+        return null;
+    }
+
+    private static java.lang.reflect.Field findAuthorObjectField(Class<?> type) {
+        for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+            String name = field.getName().toLowerCase(Locale.ROOT);
+            if (isAuthorObjectName(name) && !field.getType().isPrimitive()
+                    && field.getType() != String.class) {
+                field.setAccessible(true);
+                return field;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isAuthorObjectMethod(Method method) {
+        if (method.getParameterTypes().length != 0
+                || method.getReturnType().isPrimitive()
+                || method.getReturnType() == String.class
+                || method.getReturnType() == Void.TYPE) {
+            return false;
+        }
+        return isAuthorObjectName(method.getName().toLowerCase(Locale.ROOT));
+    }
+
+    private static boolean isAuthorObjectName(String name) {
+        return (name.contains("user") || name.contains("author") || name.contains("account"))
+                && !name.contains("reply") && !name.contains("mention")
+                && !name.contains("quote") && !name.contains("parent")
+                && !name.contains("retweet");
+    }
+
+    private static String authorObjectText(Object author) {
         if (author == null) return null;
-        StringBuilder sb = new StringBuilder();
-        appendIfNotNull(sb, invokeString(author, authorNameMethod));
-        appendIfNotNull(sb, invokeString(author, authorHandleMethod));
-        appendIfNotNull(sb, invokeString(author, authorHandle2Method));
-        return sb.length() == 0 ? null : sb.toString();
+        AuthorTextAccessors accessors = AUTHOR_TEXT_ACCESSORS.computeIfAbsent(
+                author.getClass(), TimelineFilter::resolveAuthorTextAccessors);
+        String firstValue = null;
+        for (Method method : accessors.handles) {
+            String value = invokeString(author, method);
+            if (value == null || value.trim().isEmpty()) continue;
+            String trimmed = value.trim();
+            if (trimmed.startsWith("@")) return trimmed;
+            if (firstValue == null) firstValue = trimmed;
+        }
+        if (firstValue == null) firstValue = findAuthorHandleField(author);
+        if (firstValue == null) return null;
+        return firstValue.startsWith("@") ? firstValue : "@" + firstValue;
     }
 
-    private static void appendIfNotNull(StringBuilder sb, String value) {
-        if (value == null) return;
-        sb.append(value).append(' ');
+    private static String findAuthorHandleField(Object author) {
+        for (java.lang.reflect.Field field : author.getClass().getDeclaredFields()) {
+            if (Modifier.isStatic(field.getModifiers()) || field.getType() != String.class) continue;
+            String name = field.getName().toLowerCase(Locale.ROOT);
+            if (!(name.contains("handle") || name.contains("screen") || name.contains("user"))) {
+                continue;
+            }
+            try {
+                field.setAccessible(true);
+                String value = (String) field.get(author);
+                if (value != null && !value.trim().isEmpty()) return value.trim();
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
     }
 
-    private static volatile java.lang.reflect.Field POST_RESULT_FIELD;
+    private static AuthorTextAccessors resolveAuthorTextAccessors(Class<?> type) {
+        return new AuthorTextAccessors(findStringMethods(type, AUTHOR_HANDLE_NAMES));
+    }
+
+    private static List<Method> findStringMethods(Class<?> type, String[] names) {
+        List<Method> methods = new ArrayList<>();
+        for (String name : names) {
+            for (Method method : type.getDeclaredMethods()) {
+                if (method.getName().equals(name) && method.getParameterTypes().length == 0
+                        && method.getReturnType() == String.class) {
+                    method.setAccessible(true);
+                    methods.add(method);
+                }
+            }
+        }
+        for (String name : names) {
+            for (Method method : type.getMethods()) {
+                if (method.getName().equals(name) && method.getParameterTypes().length == 0
+                        && method.getReturnType() == String.class) {
+                    if (!methods.contains(method)) methods.add(method);
+                }
+            }
+        }
+        return methods;
+    }
+
+    private static final class AuthorTextAccessors {
+        final Method[] handles;
+
+        AuthorTextAccessors(List<Method> handles) {
+            this.handles = handles.toArray(new Method[0]);
+        }
+    }
 
     private static final java.util.concurrent.atomic.AtomicLong DIAG_LAST_CT = new java.util.concurrent.atomic.AtomicLong();
     private static final java.util.concurrent.atomic.AtomicLong DIAG_LAST_BP = new java.util.concurrent.atomic.AtomicLong();

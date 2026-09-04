@@ -38,7 +38,9 @@ data class BlockEventEntity(
     val ts: Long = System.currentTimeMillis(),
     val sourceId: String,
     val preview: String,
-    val postId: String?
+    val postId: String?,
+    val matchedRule: String? = null,
+    val author: String? = null
 )
 
 @Entity(tableName = "heartbeats")
