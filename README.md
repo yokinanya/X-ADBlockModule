@@ -7,8 +7,7 @@
 
 ## 功能
 <p align="center">
-  <img src="img/1.jpg" alt="预览1" width="45%">
-  <img src="img/2.jpg" alt="预览2" width="45%">
+  <img src="img/1.jpg" alt="模块界面预览：首页、浏览历史、规则、设置" width="60%">
 </p>
 
 - **垃圾帖屏蔽**：命中词库的帖子可整行移除（REMOVE 模式）或保留头像/用户名、正文替换为"[已拦截]"占位（MARK 模式）。
