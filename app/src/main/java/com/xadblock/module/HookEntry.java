@@ -141,6 +141,49 @@ public final class HookEntry extends XposedModule {
         return instance.register(executable, id, hooker);
     }
 
+    /** Module APK path, straight from the framework: no package visibility needed. */
+    static String moduleApkPath() {
+        HookEntry instance = activeInstance;
+        if (instance == null) {
+            return null;
+        }
+        try {
+            android.content.pm.ApplicationInfo info = instance.getModuleApplicationInfo();
+            return info == null ? null : info.sourceDir;
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    /**
+     * Reads one of the module's remote files. Unlike Remote Preferences (delivered as a
+     * per-process snapshot) this is fetched from the framework on every call, so it also
+     * works when the module app was reinstalled while the target process kept running.
+     */
+    static String readRemoteFile(String name) {
+        HookEntry instance = activeInstance;
+        if (instance == null) {
+            return null;
+        }
+        try (android.os.ParcelFileDescriptor descriptor = instance.openRemoteFile(name)) {
+            if (descriptor == null) {
+                return null;
+            }
+            try (java.io.InputStream in =
+                         new android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor)) {
+                java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+                byte[] chunk = new byte[8192];
+                int read;
+                while ((read = in.read(chunk)) > 0) {
+                    buffer.write(chunk, 0, read);
+                }
+                return new String(buffer.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
     static SharedPreferences remotePreferences(String group) {
         HookEntry instance = activeInstance;
         if (instance == null) {

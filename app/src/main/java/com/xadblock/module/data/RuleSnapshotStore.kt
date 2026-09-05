@@ -1,6 +1,7 @@
 package com.xadblock.module.data
 
 import android.content.Context
+import android.os.ParcelFileDescriptor
 import java.security.MessageDigest
 import com.xadblock.module.XAdApplication
 
@@ -29,6 +30,15 @@ object RuleSnapshotStore {
         val settings = SettingsStore.load(context)
         val data = sb.toString()
         val version = fingerprint(data, settings)
+        // The file channel goes first: Remote Preferences reach a running target process as a
+        // cached snapshot, which stays empty after the module app is reinstalled until that
+        // process restarts. The remote file is read on demand and always current.
+        val fileStatus = runCatching { publishRemoteFile(data, version, settings) }
+            .fold({ "ok" }, { failure -> "failed: $failure" })
+        ModuleLogger.log(
+            "remote snapshot published version=$version rules=${limited.size} " +
+                "bytes=${data.length} file=$fileStatus"
+        )
         val prefs = XAdApplication.remotePreferences(Contract.PREF_SNAPSHOT)
         check(prefs.edit()
             .putString(Contract.KEY_SNAPSHOT_DATA, data)
@@ -44,6 +54,30 @@ object RuleSnapshotStore {
             .putString(Contract.KEY_MARK_TEXT, settings.markText)
             .commit()) {
             "Remote Preferences 提交失败"
+        }
+    }
+
+    /** Mirrors the snapshot (settings header + rules) into the module's remote file. */
+    private fun publishRemoteFile(data: String, version: Long, settings: SettingsStore.Settings) {
+        val header = buildString {
+            append("#v=").append(version).append('\n')
+            append("#mode=").append(settings.displayMode).append('\n')
+            append("#optUsername=").append(settings.optUsername).append('\n')
+            append("#optEmoji=").append(settings.optEmoji).append('\n')
+            append("#optSpecialChars=").append(settings.optSpecialChars).append('\n')
+            append("#optGrok=").append(settings.optGrok).append('\n')
+            append("#skipVerified=").append(settings.skipVerified).append('\n')
+            append("#recordViews=").append(settings.recordViews).append('\n')
+            append("#mark=").append(settings.markText).append('\n')
+            append("#whitelist=").append(settings.whitelistUsers.joinToString("\t")).append('\n')
+        }
+        val service = XAdApplication.requireXposedService()
+        val descriptor = service.openRemoteFile(Contract.SNAPSHOT_FILE)
+            ?: error("openRemoteFile 返回 null")
+        ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { stream ->
+            stream.channel.truncate(0)
+            stream.write(header.toByteArray(Charsets.UTF_8))
+            stream.write(data.toByteArray(Charsets.UTF_8))
         }
     }
 

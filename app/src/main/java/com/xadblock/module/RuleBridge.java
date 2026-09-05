@@ -47,8 +47,9 @@ public final class RuleBridge {
     private static final AtomicBoolean BOOTSTRAPPED = new AtomicBoolean(false);
     private static final AtomicBoolean BOOTSTRAP_RUNNING = new AtomicBoolean(false);
     private static final AtomicLong BOOTSTRAP_LAST_TRY = new AtomicLong();
-    private static final AtomicLong DIAG_LAST_NO_CONTEXT = new AtomicLong();
     private static final AtomicLong DIAG_LAST_NO_RULES = new AtomicLong();
+    private static final AtomicLong DIAG_LAST_PREFS = new AtomicLong();
+    private static final AtomicLong DIAG_LAST_FILE = new AtomicLong();
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
 
     private static volatile Context targetContext;
@@ -179,38 +180,148 @@ public final class RuleBridge {
         lastHeartbeatStatus = "STARTING";
     }
 
-    /** Rebuilds the active snapshot from the module prefs when untouched; falls back to assets. */
+    /**
+     * Refreshes the active ruleset. Remote Preferences are tried first (cheapest), then the
+     * remote snapshot file, then the ruleset packaged in the module APK. The file layer
+     * matters after a module reinstall: the target process keeps a stale, empty copy of the
+     * preference group until it restarts, which used to leave the filter with no rules.
+     */
     private static void reloadIfChanged(boolean force) {
         ensureBootstrap();
+        if (loadFromPreferences(force)) {
+            return;
+        }
+        loadFromRemoteFile(force);
+    }
+
+    /** @return true when Remote Preferences carried a usable snapshot. */
+    private static boolean loadFromPreferences(boolean force) {
         SharedPreferences prefs = snapshotPrefs;
         if (prefs == null) {
-            return;
+            return false;
         }
         try {
             long version = prefs.getLong(Contract.KEY_SNAPSHOT_VERSION, 0L);
+            String data = prefs.getString(Contract.KEY_SNAPSHOT_DATA, "");
+            if (version <= 0 || data == null || data.isEmpty()) {
+                if (diagAllowed(DIAG_LAST_PREFS, 60_000L)) {
+                    HookEntry.log("remote prefs snapshot empty (version=" + version + " bytes="
+                            + (data == null ? -1 : data.length()) + "); trying remote file");
+                }
+                return false;
+            }
+            if (!force && version == lastSnapshotVersion) {
+                return true;
+            }
+            loadOptions(prefs);
+            return activate(version, data, "module-snapshot");
+        } catch (Throwable throwable) {
+            HookEntry.log("remote prefs reload failed; keeping active: " + throwable);
+            return false;
+        }
+    }
+
+    /** Reads the snapshot the module app wrote through XposedService.openRemoteFile(). */
+    private static void loadFromRemoteFile(boolean force) {
+        try {
+            String content = HookEntry.readRemoteFile(Contract.SNAPSHOT_FILE);
+            if (content == null || content.isEmpty()) {
+                if (diagAllowed(DIAG_LAST_FILE, 60_000L)) {
+                    HookEntry.log("remote snapshot file unavailable: " + Contract.SNAPSHOT_FILE);
+                }
+                return;
+            }
+            long version = 0L;
+            StringBuilder rules = new StringBuilder(content.length());
+            java.util.Map<String, String> settings = new LinkedHashMap<>();
+            for (String line : content.split("\\r?\\n")) {
+                if (line.isEmpty()) continue;
+                if (line.charAt(0) == '#') {
+                    int equals = line.indexOf('=');
+                    if (equals > 1) {
+                        settings.put(line.substring(1, equals), line.substring(equals + 1));
+                    }
+                    continue;
+                }
+                rules.append(line).append('\n');
+            }
+            String versionText = settings.get("v");
+            if (versionText != null) {
+                try {
+                    version = Long.parseLong(versionText.trim());
+                } catch (NumberFormatException ignored) {
+                    version = 0L;
+                }
+            }
+            if (version <= 0 || rules.length() == 0) {
+                return;
+            }
             if (!force && version == lastSnapshotVersion) {
                 return;
             }
-            String data = prefs.getString(Contract.KEY_SNAPSHOT_DATA, "");
-            loadOptions(prefs);
-            TimelineFilter.invalidateMatches();
-            EVAL_CACHE.clear();
-            if (data == null || data.isEmpty() || version <= 0) {
-                return;
-            }
-            List<Rule> rules = compileSnapshot(data);
-            if (rules.isEmpty()) {
-                return;
-            }
-            ACTIVE.set(new Snapshot(version, Collections.unmodifiableList(rules),
-                    "module-snapshot"));
-            lastSnapshotVersion = version;
-            HookEntry.log("activated module snapshot=" + version + " rules=" + rules.size()
-                    + " mode=" + displayMode + " opt(U/E/S/G)=" + optUsername + "/" + optEmoji
-                    + "/" + optSpecialChars + "/" + optGrok);
+            applyFileSettings(settings);
+            activate(version, rules.toString(), "remote-file");
         } catch (Throwable throwable) {
-            HookEntry.log("module snapshot reload failed; keeping active: " + throwable);
+            HookEntry.log("remote snapshot file reload failed: " + throwable);
         }
+    }
+
+    private static boolean activate(long version, String data, String origin) {
+        List<Rule> rules = compileSnapshot(data);
+        TimelineFilter.invalidateMatches();
+        EVAL_CACHE.clear();
+        if (rules.isEmpty()) {
+            return false;
+        }
+        ACTIVE.set(new Snapshot(version, Collections.unmodifiableList(rules), origin));
+        lastSnapshotVersion = version;
+        HookEntry.log("activated " + origin + "=" + version + " rules=" + rules.size()
+                + " mode=" + displayMode + " opt(U/E/S/G)=" + optUsername + "/" + optEmoji
+                + "/" + optSpecialChars + "/" + optGrok);
+        return true;
+    }
+
+    private static void applyFileSettings(java.util.Map<String, String> settings) {
+        try {
+            displayMode = intSetting(settings, "mode", Contract.DISPLAY_MODE_MARK);
+            optUsername = boolSetting(settings, "optUsername", true);
+            optEmoji = boolSetting(settings, "optEmoji", true);
+            optSpecialChars = boolSetting(settings, "optSpecialChars", true);
+            optGrok = boolSetting(settings, "optGrok", false);
+            skipVerified = boolSetting(settings, "skipVerified", false);
+            recordViews = boolSetting(settings, "recordViews", true);
+            String text = settings.get("mark");
+            markText = (text == null || text.isEmpty() || "已屏蔽".equals(text))
+                    ? "[已拦截]" : text;
+            String users = settings.get("whitelist");
+            java.util.HashSet<String> normalizedUsers = new java.util.HashSet<>();
+            if (users != null && !users.isEmpty()) {
+                for (String user : users.split("\t")) {
+                    if (user == null || user.trim().isEmpty()) continue;
+                    normalizedUsers.add(normalizeForMatch(user));
+                }
+            }
+            whitelistUsers = Collections.unmodifiableSet(normalizedUsers);
+        } catch (Throwable ignored) {
+            // keep previous values on parse hiccup
+        }
+    }
+
+    private static int intSetting(java.util.Map<String, String> settings, String key, int fallback) {
+        String value = settings.get(key);
+        if (value == null) return fallback;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static boolean boolSetting(java.util.Map<String, String> settings, String key,
+                                      boolean fallback) {
+        String value = settings.get(key);
+        if (value == null) return fallback;
+        return "true".equalsIgnoreCase(value.trim()) || "1".equals(value.trim());
     }
 
     private static void loadOptions(SharedPreferences prefs) {
@@ -285,16 +396,6 @@ public final class RuleBridge {
         if (BOOTSTRAPPED.get()) {
             return;
         }
-        Context context = targetContext;
-        if (context == null) {
-            // Hooks can fire before Application.attach, and after a module hot reload that
-            // hook never fires again. Leave the flag clear so a later call can still load
-            // the packaged ruleset instead of leaving the filter permanently ruleless.
-            if (diagAllowed(DIAG_LAST_NO_CONTEXT, 30_000L)) {
-                HookEntry.log("packaged bootstrap deferred: target context not ready");
-            }
-            return;
-        }
         long now = System.currentTimeMillis();
         long previous = BOOTSTRAP_LAST_TRY.get();
         if (previous != 0L && now - previous < 10_000L) {
@@ -305,22 +406,10 @@ public final class RuleBridge {
             return;
         }
         try {
-            AssetManager assets = context.createPackageContext(
-                    Contract.MODULE_PACKAGE, Context.CONTEXT_IGNORE_SECURITY).getAssets();
-            List<Rule> rules = new ArrayList<>();
-            try (InputStream in = assets.open(BUILTIN_ASSET);
-                 BufferedReader reader = new BufferedReader(
-                         new InputStreamReader(in, StandardCharsets.UTF_8))) {
-                int builtInId = -1;
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    List<String[]> parsed = RuleParserLine.parse(line);
-                    if (parsed == null) continue;
-                    for (String[] kindPattern : parsed) {
-                        rules.add(Rule.compile(builtInId--, "builtin",
-                                kindPattern[0], kindPattern[1], 50));
-                    }
-                }
+            List<Rule> rules = loadBuiltinRules();
+            if (rules.isEmpty()) {
+                HookEntry.log("packaged bootstrap unavailable (will retry)");
+                return;
             }
             Snapshot snapshot = new Snapshot(
                     rules.size(), Collections.unmodifiableList(rules), "packaged-bootstrap");
@@ -334,6 +423,58 @@ public final class RuleBridge {
         } finally {
             BOOTSTRAP_RUNNING.set(false);
         }
+    }
+
+    /**
+     * Loads the ruleset packaged with the module. Reading the module APK directly is the
+     * reliable path (works without a Context and without package visibility); the
+     * createPackageContext route stays as a fallback.
+     */
+    private static List<Rule> loadBuiltinRules() {
+        String apkPath = HookEntry.moduleApkPath();
+        if (apkPath != null) {
+            try (java.util.zip.ZipFile apk = new java.util.zip.ZipFile(apkPath)) {
+                java.util.zip.ZipEntry entry = apk.getEntry("assets/" + BUILTIN_ASSET);
+                if (entry != null) {
+                    try (InputStream in = apk.getInputStream(entry)) {
+                        return parseBuiltinRules(in);
+                    }
+                }
+            } catch (Throwable throwable) {
+                HookEntry.log("builtin read from module apk failed: " + throwable);
+            }
+        }
+        Context context = targetContext;
+        if (context != null) {
+            try {
+                AssetManager assets = context.createPackageContext(
+                        Contract.MODULE_PACKAGE, Context.CONTEXT_IGNORE_SECURITY).getAssets();
+                try (InputStream in = assets.open(BUILTIN_ASSET)) {
+                    return parseBuiltinRules(in);
+                }
+            } catch (Throwable throwable) {
+                HookEntry.log("builtin read from module assets failed: " + throwable);
+            }
+        }
+        return Collections.emptyList();
+    }
+
+    private static List<Rule> parseBuiltinRules(InputStream in) throws Throwable {
+        List<Rule> rules = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            int builtInId = -1;
+            String line;
+            while ((line = reader.readLine()) != null) {
+                List<String[]> parsed = RuleParserLine.parse(line);
+                if (parsed == null) continue;
+                for (String[] kindPattern : parsed) {
+                    rules.add(Rule.compile(builtInId--, "builtin",
+                            kindPattern[0], kindPattern[1], 50));
+                }
+            }
+        }
+        return rules;
     }
 
     private static boolean diagAllowed(AtomicLong marker, long intervalMs) {

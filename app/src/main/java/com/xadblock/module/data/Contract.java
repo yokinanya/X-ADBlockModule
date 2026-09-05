@@ -16,6 +16,13 @@ public final class Contract {
     /** Module package (scope of the Remote Preferences and the broadcast target). */
     public static final String MODULE_PACKAGE = "com.xadblock.module";
 
+    /**
+     * Remote snapshot file (module writes through XposedService, hook reads through
+     * XposedInterface). Survives module reinstalls without a target restart, which the
+     * Remote Preferences snapshot does not.
+     */
+    public static final String SNAPSHOT_FILE = "rules_snapshot.txt";
+
     /** Remote Preferences snapshot group (module writes, hook reads). */
     public static final String PREF_SNAPSHOT = "rules_snapshot";
     public static final String KEY_SNAPSHOT_VERSION = "snapshot_version";
