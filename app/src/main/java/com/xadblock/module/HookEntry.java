@@ -66,23 +66,55 @@ public final class HookEntry extends XposedModule {
 
     @Override
     public void onHotReloaded(HotReloadedParam param) {
+        // Prefer the target app's class loader: the Application.attach hook is declared on a
+        // framework class, and its (boot) loader cannot resolve any of the X classes.
+        ClassLoader bootLoader = Application.class.getClassLoader();
         ClassLoader classLoader = null;
         for (HookHandle handle : param.getOldHookHandles()) {
-            if (classLoader == null) {
-                classLoader = handle.getExecutable().getDeclaringClass().getClassLoader();
+            ClassLoader candidate = handle.getExecutable().getDeclaringClass().getClassLoader();
+            if (candidate != null && candidate != bootLoader) {
+                classLoader = candidate;
+                break;
             }
+        }
+        for (HookHandle handle : param.getOldHookHandles()) {
             handle.unhook();
         }
         hookHandles.clear();
-        if (classLoader != null) {
-            try {
-                hookApplicationAttach();
-                TimelineFilter.install(classLoader);
-            } catch (Throwable failure) {
-                log(Log.ERROR, TAG, "failed to reinstall hooks after hot reload", failure);
-                logThrowable(failure);
-            }
-            PostViewTracker.install(classLoader);
+
+        // Application.attach already ran in this process and never fires again, so the
+        // bridge (rules, event channel, heartbeat) has to be revived explicitly - without
+        // this the module stays loaded but filters nothing until X is restarted.
+        Context context = currentApplication();
+        if (context != null) {
+            HookLogSink.init(context);
+            RuleBridge.initialize(context);
+        } else {
+            log(Log.ERROR, TAG, "hot reload: no current Application; bridge stays idle");
+        }
+        if (classLoader == null) {
+            log(Log.ERROR, TAG, "hot reload: target class loader not resolved");
+            return;
+        }
+        try {
+            hookApplicationAttach();
+            TimelineFilter.install(classLoader);
+        } catch (Throwable failure) {
+            log(Log.ERROR, TAG, "failed to reinstall hooks after hot reload", failure);
+            logThrowable(failure);
+        }
+        PostViewTracker.install(classLoader);
+        log(Log.INFO, TAG, "hot reload complete");
+    }
+
+    /** The running app instance; the only way back to a Context after a hot reload. */
+    private static Context currentApplication() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Object application = activityThread.getMethod("currentApplication").invoke(null);
+            return application instanceof Context ? (Context) application : null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 

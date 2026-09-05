@@ -58,6 +58,8 @@ public final class Contract {
     public static final String EXTRA_TARGET_VERSION = "target_version";
     public static final String EXTRA_SNAPSHOT_VERSION = "snapshot_version";
     public static final String EXTRA_LOG = "log_lines";
+    /** Hook-side health summary (ruleset size, options, hook install result). */
+    public static final String EXTRA_SELFCHECK = "selfcheck";
 
     private Contract() {}
 }

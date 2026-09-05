@@ -94,6 +94,9 @@ class HookBridgeReceiver : BroadcastReceiver() {
         db.heartbeatDao().trim(20)
         ModuleLogger.log("heartbeat: ${heartbeat.status} proc=${heartbeat.process} " +
                 "snap=${heartbeat.snapshotVersion} x=${heartbeat.targetVersion}")
+        intent.getStringExtra(Contract.EXTRA_SELFCHECK)?.let { summary ->
+            ModuleLogger.log("hook selfcheck: $summary")
+        }
         intent.getStringExtra(Contract.EXTRA_LOG)?.let { lines ->
             lines.lineSequence().forEach { ModuleLogger.log("hook|$it") }
         }

@@ -46,7 +46,17 @@ final class TimelineFilter {
     };
 
     private static final AtomicBoolean FILTER_INSTALLED = new AtomicBoolean(false);
+    /** Human readable install result, surfaced through the heartbeat self-check. */
+    private static volatile String INSTALL_SUMMARY = "not-installed";
+
+    static String installSummary() {
+        return INSTALL_SUMMARY;
+    }
     private static final java.util.concurrent.atomic.AtomicInteger FILTER_LOG_TICKS =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicInteger POST_CTOR_HOOKS =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicInteger MARK_HOOKS =
             new java.util.concurrent.atomic.AtomicInteger();
 
     /** entryId -> true once firstMatch has evaluated this post (miss or hit). */
@@ -106,6 +116,9 @@ final class TimelineFilter {
 
     static void clearState() {
         FILTER_INSTALLED.set(false);
+        INSTALL_SUMMARY = "not-installed";
+        POST_CTOR_HOOKS.set(0);
+        MARK_HOOKS.set(0);
         synchronized (EVALUATED_IDS) {
             EVALUATED_IDS.clear();
         }
@@ -184,9 +197,13 @@ final class TimelineFilter {
             hookMarkPlaceholder();
 
             FILTER_INSTALLED.set(true);
+            INSTALL_SUMMARY = "ok entry=" + installedEntry + " lambda=" + installedLambda
+                    + " post=" + POST_CTOR_HOOKS.get() + " mark=" + MARK_HOOKS.get();
             HookEntry.log(" feed filter installed (entry=" + installedEntry
-                    + ", lambda=" + installedLambda + ")");
+                    + ", lambda=" + installedLambda + ", post=" + POST_CTOR_HOOKS.get()
+                    + ", mark=" + MARK_HOOKS.get() + ")");
         } catch (Throwable throwable) {
+            INSTALL_SUMMARY = "FAILED: " + throwable;
             HookEntry.log(" FAILED to install feed filter");
             HookEntry.logThrowable(throwable);
             throw throwable;
@@ -374,6 +391,7 @@ final class TimelineFilter {
             } catch (Throwable ignored) {
             }
         }
+        POST_CTOR_HOOKS.set(installed);
         HookEntry.log(" hooked UrtTimelinePost constructors: " + installed);
     }
 
@@ -706,6 +724,7 @@ final class TimelineFilter {
             } catch (Throwable ignored) {
             }
         }
+        MARK_HOOKS.set(hooked);
         HookEntry.log(" hooked mark placeholder b5.text: " + hooked);
     }
 

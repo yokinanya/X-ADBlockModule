@@ -6,8 +6,6 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
-import java.io.InputStream
-import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -25,6 +23,7 @@ object ModuleLogger {
     private val time = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US)
     private var started = false
     private var contextRef: Context? = null
+    private var cachedUri: Uri? = null
 
     @Synchronized
     fun init(context: Context) {
@@ -64,35 +63,71 @@ object ModuleLogger {
         }
     }
 
+    /**
+     * Appends through MediaStore. A reinstall orphans the previous entry (the new install
+     * no longer owns it), so a failed write now falls back to a freshly created entry
+     * instead of silently dropping every log line.
+     */
     private fun append(text: String) {
         val context = contextRef ?: return
         if (Build.VERSION.SDK_INT < 29) return
         try {
-            val resolver: ContentResolver = context.contentResolver
+            val resolver = context.contentResolver
             val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, FILE_NAME)
-                put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/")
-                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            val target = cachedUri
+                ?: findExisting(resolver, collection)
+                ?: insertNew(resolver, collection)
+            if (target != null && writeAll(resolver, target, text)) {
+                cachedUri = target
+                return
             }
-            var uri: Uri? = null
+            cachedUri = null
+            val fresh = insertNew(resolver, collection) ?: return
+            if (writeAll(resolver, fresh, text)) {
+                cachedUri = fresh
+                android.util.Log.i("X-ADBlock", "module log switched to a new file: " + fresh)
+            }
+        } catch (failure: Throwable) {
+            android.util.Log.e("X-ADBlock", "module log append failed", failure)
+        }
+    }
+
+    private fun findExisting(resolver: ContentResolver, collection: Uri): Uri? {
+        return try {
             resolver.query(
                 collection,
                 arrayOf(MediaStore.MediaColumns._ID),
-                "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+                MediaStore.MediaColumns.DISPLAY_NAME + "=?",
                 arrayOf(FILE_NAME),
                 null
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {
-                    uri = Uri.withAppendedPath(collection, cursor.getLong(0).toString())
+                    Uri.withAppendedPath(collection, cursor.getLong(0).toString())
+                } else {
+                    null
                 }
             }
-            if (uri == null) {
-                uri = resolver.insert(collection, values)
-            }
-            if (uri == null) return
+        } catch (ignored: Throwable) {
+            null
+        }
+    }
 
+    private fun insertNew(resolver: ContentResolver, collection: Uri): Uri? {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, FILE_NAME)
+            put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/")
+        }
+        return try {
+            resolver.insert(collection, values)
+        } catch (ignored: Throwable) {
+            null
+        }
+    }
+
+    /** Rewrites the file with the newest ~512KB; false means the entry is not writable. */
+    private fun writeAll(resolver: ContentResolver, uri: Uri, text: String): Boolean {
+        return try {
             val old: ByteArray = try {
                 resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
             } catch (ignored: Throwable) {
@@ -100,17 +135,15 @@ object ModuleLogger {
             }
             var next = old + text.toByteArray()
             if (next.size > MAX_BYTES) {
-                val truncated = next.copyOfRange(next.size - (MAX_BYTES * 0.6).toInt(), next.size)
-                next = "... [log truncated] ...\n".toByteArray() + truncated
+                val kept = next.copyOfRange(next.size - (MAX_BYTES * 0.6).toInt(), next.size)
+                next = "... [log truncated] ...\n".toByteArray() + kept
             }
-            resolver.openOutputStream(uri, "wt")?.use { output ->
-                output.write(next)
-            }
-            resolver.update(uri, ContentValues().apply {
-                put(MediaStore.MediaColumns.IS_PENDING, 0)
-            }, null, null)
+            val stream = resolver.openOutputStream(uri, "wt") ?: return false
+            stream.use { output -> output.write(next) }
+            true
         } catch (failure: Throwable) {
-            android.util.Log.e("X-ADBlock", "module log append failed", failure)
+            android.util.Log.e("X-ADBlock", "module log write failed", failure)
+            false
         }
     }
 }

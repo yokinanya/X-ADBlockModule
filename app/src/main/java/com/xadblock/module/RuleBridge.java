@@ -45,6 +45,10 @@ public final class RuleBridge {
 
     private static final AtomicReference<Snapshot> ACTIVE = new AtomicReference<>();
     private static final AtomicBoolean BOOTSTRAPPED = new AtomicBoolean(false);
+    private static final AtomicBoolean BOOTSTRAP_RUNNING = new AtomicBoolean(false);
+    private static final AtomicLong BOOTSTRAP_LAST_TRY = new AtomicLong();
+    private static final AtomicLong DIAG_LAST_NO_CONTEXT = new AtomicLong();
+    private static final AtomicLong DIAG_LAST_NO_RULES = new AtomicLong();
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
 
     private static volatile Context targetContext;
@@ -169,6 +173,7 @@ public final class RuleBridge {
         }
         STAT_TOTAL.set(0);
         BOOTSTRAPPED.set(false);
+        BOOTSTRAP_LAST_TRY.set(0L);
         INITIALIZED.set(false);
         lastSnapshotVersion = Long.MIN_VALUE;
         lastHeartbeatStatus = "STARTING";
@@ -280,12 +285,26 @@ public final class RuleBridge {
         if (BOOTSTRAPPED.get()) {
             return;
         }
-        BOOTSTRAPPED.set(true);
-        try {
-            Context context = targetContext;
-            if (context == null) {
-                throw new IllegalStateException("target context is not initialized");
+        Context context = targetContext;
+        if (context == null) {
+            // Hooks can fire before Application.attach, and after a module hot reload that
+            // hook never fires again. Leave the flag clear so a later call can still load
+            // the packaged ruleset instead of leaving the filter permanently ruleless.
+            if (diagAllowed(DIAG_LAST_NO_CONTEXT, 30_000L)) {
+                HookEntry.log("packaged bootstrap deferred: target context not ready");
             }
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long previous = BOOTSTRAP_LAST_TRY.get();
+        if (previous != 0L && now - previous < 10_000L) {
+            return;
+        }
+        if (!BOOTSTRAP_LAST_TRY.compareAndSet(previous, now)
+                || !BOOTSTRAP_RUNNING.compareAndSet(false, true)) {
+            return;
+        }
+        try {
             AssetManager assets = context.createPackageContext(
                     Contract.MODULE_PACKAGE, Context.CONTEXT_IGNORE_SECURITY).getAssets();
             List<Rule> rules = new ArrayList<>();
@@ -308,10 +327,34 @@ public final class RuleBridge {
             if (ACTIVE.compareAndSet(null, snapshot) || ACTIVE.get().origin.startsWith("packaged")) {
                 ACTIVE.set(snapshot);
             }
+            BOOTSTRAPPED.set(true);
             HookEntry.log("packaged bootstrap ready rules=" + rules.size());
         } catch (Throwable throwable) {
-            HookEntry.log("packaged bootstrap failed: " + throwable);
+            HookEntry.log("packaged bootstrap failed (will retry): " + throwable);
+        } finally {
+            BOOTSTRAP_RUNNING.set(false);
         }
+    }
+
+    private static boolean diagAllowed(AtomicLong marker, long intervalMs) {
+        long now = System.currentTimeMillis();
+        long previous = marker.get();
+        return now - previous >= intervalMs && marker.compareAndSet(previous, now);
+    }
+
+    /** One-line health summary shipped with every heartbeat, mirrored into the module log. */
+    private static String selfCheck() {
+        Snapshot snapshot = ACTIVE.get();
+        return "rules=" + (snapshot == null ? -1 : snapshot.rules.size())
+                + " origin=" + (snapshot == null ? "none" : snapshot.origin)
+                + " mode=" + displayMode
+                + " opt(U/E/S/G)=" + optUsername + "/" + optEmoji + "/" + optSpecialChars
+                + "/" + optGrok
+                + " skipVerified=" + skipVerified
+                + " whitelist=" + whitelistUsers.size()
+                + " views=" + recordViews
+                + " prefs=" + (snapshotPrefs != null)
+                + " filter[" + TimelineFilter.installSummary() + "]";
     }
 
     /** Render-time text-level check: matches a single text against the active ruleset. */
@@ -352,6 +395,13 @@ public final class RuleBridge {
         }
         Snapshot snapshot = ACTIVE.get();
         if (snapshot == null) {
+            ensureBootstrap();
+            snapshot = ACTIVE.get();
+        }
+        if (snapshot == null) {
+            if (diagAllowed(DIAG_LAST_NO_RULES, 30_000L)) {
+                HookEntry.log("no active ruleset: nothing will be filtered (" + selfCheck() + ")");
+            }
             return null;
         }
         String combined = combine(postText, postUrl, optUsername ? authorText : null);
@@ -602,7 +652,7 @@ public final class RuleBridge {
     }
 
     private static void flushBlockEvents() {
-        if (EVENT_QUEUE.isEmpty()) {
+        if (EVENT_QUEUE.isEmpty() || targetContext == null) {
             return;
         }
         List<PendingBlock> batch;
@@ -662,7 +712,7 @@ public final class RuleBridge {
     }
 
     private static void flushViewEvents() {
-        if (VIEW_QUEUE.isEmpty()) {
+        if (VIEW_QUEUE.isEmpty() || targetContext == null) {
             return;
         }
         List<PendingView> batch;
@@ -715,7 +765,8 @@ public final class RuleBridge {
                 .putExtra(Contract.EXTRA_STATUS, status)
                 .putExtra(Contract.EXTRA_PROCESS, context.getApplicationInfo().processName)
                 .putExtra(Contract.EXTRA_SNAPSHOT_VERSION, lastSnapshotVersion)
-                .putExtra(Contract.EXTRA_TARGET_VERSION, safeVersionName(context));
+                .putExtra(Contract.EXTRA_TARGET_VERSION, safeVersionName(context))
+                .putExtra(Contract.EXTRA_SELFCHECK, selfCheck());
         String fallbackLog = HookLogSink.drainFallback();
         if (fallbackLog != null) {
             intent.putExtra(Contract.EXTRA_LOG, fallbackLog);
