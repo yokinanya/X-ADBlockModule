@@ -18,6 +18,7 @@ object SettingsStore {
     private const val KEY_SKIP_VERIFIED = "skip_verified"
     private const val KEY_MARK_TEXT = "mark_text"
     private const val KEY_WHITELIST_USERS = "whitelist_users"
+    private const val KEY_RECORD_VIEWS = "record_views"
 
     data class Settings(
         val displayMode: Int = Contract.DISPLAY_MODE_MARK,
@@ -27,6 +28,7 @@ object SettingsStore {
         val optGrok: Boolean = false,
         val markText: String = DEFAULT_MARK_TEXT,
         val skipVerified: Boolean = false,
+        val recordViews: Boolean = true,
         val whitelistUsers: Set<String> = emptySet()
     ) {
         val isMarkMode: Boolean get() = displayMode == Contract.DISPLAY_MODE_MARK
@@ -45,6 +47,7 @@ object SettingsStore {
             optSpecialChars = prefs.getBoolean(KEY_OPT_SPECIAL_CHARS, true),
             optGrok = prefs.getBoolean(KEY_OPT_GROK, false),
             skipVerified = prefs.getBoolean(KEY_SKIP_VERIFIED, false),
+            recordViews = prefs.getBoolean(KEY_RECORD_VIEWS, true),
             whitelistUsers = prefs.getStringSet(KEY_WHITELIST_USERS, emptySet()).orEmpty().toSet(),
             markText = if (storedMarkText == LEGACY_MARK_TEXT) DEFAULT_MARK_TEXT else storedMarkText
         )
@@ -58,6 +61,7 @@ object SettingsStore {
             .putBoolean(KEY_OPT_SPECIAL_CHARS, settings.optSpecialChars)
             .putBoolean(KEY_OPT_GROK, settings.optGrok)
             .putBoolean(KEY_SKIP_VERIFIED, settings.skipVerified)
+            .putBoolean(KEY_RECORD_VIEWS, settings.recordViews)
             .putStringSet(KEY_WHITELIST_USERS, settings.whitelistUsers.toSet())
             .putString(KEY_MARK_TEXT, settings.markText)
             .apply()

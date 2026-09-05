@@ -10,6 +10,11 @@ import kotlinx.coroutines.flow.Flow
 
 const val BLOCK_EVENT_HISTORY_LIMIT = 500
 
+/** Browsing history is capped both by age (7 days) and by row count. */
+const val POST_VIEW_HISTORY_LIMIT = 2000
+const val POST_VIEW_RETENTION_DAYS = 7L
+const val POST_VIEW_RETENTION_MS = POST_VIEW_RETENTION_DAYS * 24 * 60 * 60 * 1000
+
 @Dao
 interface SubscriptionDao {
     @Query("SELECT * FROM subscriptions ORDER BY id")
@@ -113,6 +118,33 @@ interface BlockEventDao {
 
     @Query("SELECT COUNT(*) FROM block_events")
     fun countAll(): Int
+}
+
+@Dao
+interface PostViewDao {
+    @Query("SELECT * FROM post_views ORDER BY ts DESC LIMIT :limit")
+    fun recent(limit: Int): Flow<List<PostViewEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun upsert(entity: PostViewEntity)
+
+    @Query("DELETE FROM post_views WHERE postId=:postId")
+    fun delete(postId: String)
+
+    @Query("DELETE FROM post_views WHERE ts < :cutoff")
+    fun deleteOlderThan(cutoff: Long)
+
+    @Query("DELETE FROM post_views WHERE postId NOT IN (SELECT postId FROM post_views ORDER BY ts DESC LIMIT :keep)")
+    fun trim(keep: Int)
+
+    @Query("DELETE FROM post_views")
+    fun clear()
+
+    @Query("SELECT COUNT(*) FROM post_views")
+    fun countAll(): Int
+
+    @Query("SELECT COUNT(*) FROM post_views")
+    fun countFlow(): Flow<Int>
 }
 
 @Dao

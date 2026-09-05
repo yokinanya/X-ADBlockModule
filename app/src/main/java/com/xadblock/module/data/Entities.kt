@@ -43,6 +43,20 @@ data class BlockEventEntity(
     val author: String? = null
 )
 
+/**
+ * One opened post (browsing history). The post id is the primary key, so re-opening a
+ * post refreshes its timestamp instead of piling up duplicates.
+ */
+@Entity(tableName = "post_views", indices = [Index(value = ["ts"])])
+data class PostViewEntity(
+    @PrimaryKey val postId: String,
+    val url: String,
+    val author: String = "",
+    val authorName: String = "",
+    val preview: String = "",
+    val ts: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "heartbeats")
 data class HeartbeatEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

@@ -39,6 +39,7 @@ object RuleSnapshotStore {
             .putBoolean(Contract.KEY_OPT_SPECIAL_CHARS, settings.optSpecialChars)
             .putBoolean(Contract.KEY_OPT_GROK, settings.optGrok)
             .putBoolean(Contract.KEY_SKIP_VERIFIED, settings.skipVerified)
+            .putBoolean(Contract.KEY_RECORD_VIEWS, settings.recordViews)
             .putStringSet(Contract.KEY_WHITELIST_USERS, settings.whitelistUsers)
             .putString(Contract.KEY_MARK_TEXT, settings.markText)
             .commit()) {
@@ -54,6 +55,7 @@ object RuleSnapshotStore {
             append(settings.optSpecialChars).append('|')
             append(settings.optGrok).append('|')
             append(settings.skipVerified).append('|')
+            append(settings.recordViews).append('|')
             append(settings.markText).append('|')
             settings.whitelistUsers.sorted().forEach { append(it).append('|') }
         }

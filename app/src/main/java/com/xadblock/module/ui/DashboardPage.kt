@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
@@ -36,9 +37,11 @@ import com.xadblock.module.XposedServiceState
 internal fun DashboardPage(
     viewModel: MainViewModel,
     serviceState: XposedServiceState,
-    onOpenHistory: () -> Unit
+    onOpenHistory: () -> Unit,
+    onOpenBrowseHistory: () -> Unit
 ) {
     val history by viewModel.allHistory.collectAsState()
+    val browseCount by viewModel.browseCount.collectAsState()
     val blockTotal by viewModel.blockTotal.collectAsState()
     val localCount by viewModel.localCount.collectAsState()
     val subscriptions by viewModel.subscriptions.collectAsState()
@@ -66,7 +69,20 @@ internal fun DashboardPage(
                 }
             }
         }
+        item { BrowseHistoryEntry(browseCount, onOpenBrowseHistory) }
         item { HistoryEntry(history.size, onOpenHistory) }
+    }
+}
+
+@Composable
+private fun BrowseHistoryEntry(count: Int, onClick: () -> Unit) {
+    ElevatedCard {
+        ListItem(
+            modifier = Modifier.clickable(onClick = onClick),
+            leadingContent = { Icon(Icons.Filled.Visibility, contentDescription = null) },
+            headlineContent = { Text("浏览历史") },
+            supportingContent = { Text("已记录 $count 条 · 保留 7 天") }
+        )
     }
 }
 

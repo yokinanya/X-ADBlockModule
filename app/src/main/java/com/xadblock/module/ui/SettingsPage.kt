@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.PersonSearch
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ElevatedCard
@@ -58,6 +59,7 @@ internal fun SettingsPage(viewModel: MainViewModel) {
     ) {
         DisplayModeSection(viewModel)
         MatchOptionsSection(viewModel)
+        BrowseHistorySection(viewModel)
         WhitelistSection(viewModel)
     }
 }
@@ -106,6 +108,25 @@ private fun MatchOptionsSection(viewModel: MainViewModel) {
             }
             if (index != items.lastIndex) HorizontalDivider(Modifier.padding(start = 56.dp))
         }
+    }
+}
+
+@Composable
+private fun BrowseHistorySection(viewModel: MainViewModel) {
+    val settings by viewModel.settings.collectAsState()
+    SettingsSection("浏览历史") {
+        SettingToggle(
+            ToggleSetting("记录帖子浏览历史", Icons.Filled.Visibility),
+            settings.recordViews
+        ) { checked ->
+            viewModel.updateSettings(settings.copy(recordViews = checked))
+        }
+        Text(
+            "记录点开的帖子链接与正文摘要，保留最近 7 天；可在首页「浏览历史」中查看、搜索或清空",
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

@@ -51,11 +51,15 @@ public final class HookEntry extends XposedModule {
             log(Log.ERROR, TAG, "failed to install target hooks", failure);
             logThrowable(failure);
         }
+        // Browsing history is independent from filtering: keep it alive even if the
+        // feed filter failed to install, and never let it break the filter either.
+        PostViewTracker.install(param.getClassLoader());
     }
 
     @Override
     public boolean onHotReloading(HotReloadingParam param) {
         TimelineFilter.clearState();
+        PostViewTracker.clearState();
         RuleBridge.clearState();
         return true;
     }
@@ -78,6 +82,7 @@ public final class HookEntry extends XposedModule {
                 log(Log.ERROR, TAG, "failed to reinstall hooks after hot reload", failure);
                 logThrowable(failure);
             }
+            PostViewTracker.install(classLoader);
         }
     }
 

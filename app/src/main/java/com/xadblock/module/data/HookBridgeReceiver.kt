@@ -20,6 +20,7 @@ class HookBridgeReceiver : BroadcastReceiver() {
             try {
                 when (intent.action) {
                     Contract.ACTION_BLOCK_EVENTS -> handleBlockEvents(context, intent)
+                    Contract.ACTION_VIEW_EVENTS -> handleViewEvents(context, intent)
                     Contract.ACTION_HEARTBEAT -> handleHeartbeat(context, intent)
                 }
             } catch (failure: Throwable) {
@@ -63,6 +64,21 @@ class HookBridgeReceiver : BroadcastReceiver() {
             author = parts.getOrNull(3)?.takeIf(String::isNotBlank)?.take(200),
             matchedRule = parts.getOrNull(4)?.takeIf(String::isNotBlank)?.take(200)
         )
+    }
+
+    private fun handleViewEvents(context: Context, intent: Intent) {
+        val payload = intent.getStringExtra(Contract.EXTRA_ITEMS) ?: return
+        if (payload.isEmpty()) return
+        val dao = AppDatabase.get(context).postViewDao()
+        var stored = 0
+        payload.lineSequence().mapNotNull { PostViewEvents.parse(it) }.forEach { view ->
+            dao.upsert(view)
+            stored++
+        }
+        if (stored == 0) return
+        dao.deleteOlderThan(System.currentTimeMillis() - POST_VIEW_RETENTION_MS)
+        dao.trim(POST_VIEW_HISTORY_LIMIT)
+        ModuleLogger.log("post views received: $stored")
     }
 
     private fun handleHeartbeat(context: Context, intent: Intent) {

@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -24,6 +25,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,6 +50,7 @@ internal enum class MainTab(val title: String, val icon: ImageVector) {
 private data class MainShellState(
     val tab: MainTab,
     val historyVisible: Boolean,
+    val browseVisible: Boolean,
     val serviceState: com.xadblock.module.XposedServiceState,
     val snackbarHost: SnackbarHostState
 )
@@ -56,6 +59,8 @@ private data class MainShellActions(
     val onTabSelect: (MainTab) -> Unit,
     val onOpenHistory: () -> Unit,
     val onCloseHistory: () -> Unit,
+    val onOpenBrowse: () -> Unit,
+    val onCloseBrowse: () -> Unit,
     val onAddWhitelist: (String) -> Unit,
     val onAddSubscription: () -> Unit,
     val onEditSubscription: (SubscriptionEntity) -> Unit,
@@ -87,6 +92,7 @@ fun XADBlockApp(viewModel: MainViewModel) {
     val snackbarHost = remember { SnackbarHostState() }
     var tabName by rememberSaveable { mutableStateOf(MainTab.HOME.name) }
     var historyVisible by rememberSaveable { mutableStateOf(false) }
+    var browseVisible by rememberSaveable { mutableStateOf(false) }
     var showSubscriptionEditor by remember { mutableStateOf(false) }
     var editingSubscription by remember { mutableStateOf<SubscriptionEntity?>(null) }
     var showLocalEditor by rememberSaveable { mutableStateOf(false) }
@@ -94,6 +100,7 @@ fun XADBlockApp(viewModel: MainViewModel) {
     val tab = MainTab.valueOf(tabName)
 
     BackHandler(enabled = historyVisible) { historyVisible = false }
+    BackHandler(enabled = browseVisible) { browseVisible = false }
     MessageEffect(message, snackbarHost, viewModel::dismissMessage)
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -104,11 +111,19 @@ fun XADBlockApp(viewModel: MainViewModel) {
             .onFailure { viewModel.reportFailure("导入失败", it) }
     }
 
-    val shellState = MainShellState(tab, historyVisible, serviceState, snackbarHost)
+    val shellState = MainShellState(tab, historyVisible, browseVisible, serviceState, snackbarHost)
     val shellActions = MainShellActions(
         onTabSelect = { tabName = it.name },
-        onOpenHistory = { historyVisible = true },
+        onOpenHistory = {
+            browseVisible = false
+            historyVisible = true
+        },
         onCloseHistory = { historyVisible = false },
+        onOpenBrowse = {
+            historyVisible = false
+            browseVisible = true
+        },
+        onCloseBrowse = { browseVisible = false },
         onAddWhitelist = viewModel::addWhitelistUser,
         onAddSubscription = {
             editingSubscription = null
@@ -169,22 +184,42 @@ private fun MainPageHost(
     state: MainShellState,
     actions: MainShellActions
 ) {
+    var confirmClearBrowse by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             MainTopBar(
-                MainTopBarState(state.tab, state.historyVisible),
-                MainTopBarActions(actions.onCloseHistory, viewModel::clearHistory)
+                MainTopBarState(state.tab, state.historyVisible, state.browseVisible),
+                MainTopBarActions(
+                    onBack = if (state.browseVisible) actions.onCloseBrowse else actions.onCloseHistory,
+                    onClearHistory = viewModel::clearHistory,
+                    onClearBrowse = { confirmClearBrowse = true }
+                )
             )
         },
         bottomBar = {
             MainNavigation(state.tab) {
                 actions.onCloseHistory()
+                actions.onCloseBrowse()
                 actions.onTabSelect(it)
             }
         },
         snackbarHost = { SnackbarHost(state.snackbarHost) }
     ) { padding ->
-        if (state.historyVisible) {
+        if (confirmClearBrowse) {
+            ClearBrowseHistoryDialog(
+                onDismiss = { confirmClearBrowse = false },
+                onConfirm = {
+                    confirmClearBrowse = false
+                    viewModel.clearBrowseHistory()
+                }
+            )
+        }
+        if (state.browseVisible) {
+            BrowseHistoryPage(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize().padding(padding)
+            )
+        } else if (state.historyVisible) {
             HistoryPage(
                 viewModel = viewModel,
                 modifier = Modifier.fillMaxSize().padding(padding),
@@ -198,7 +233,12 @@ private fun MainPageHost(
                 label = "main-tabs"
             ) { target ->
                 when (target) {
-                    MainTab.HOME -> DashboardPage(viewModel, state.serviceState, actions.onOpenHistory)
+                    MainTab.HOME -> DashboardPage(
+                        viewModel,
+                        state.serviceState,
+                        actions.onOpenHistory,
+                        actions.onOpenBrowse
+                    )
                     MainTab.RULES -> RulesPage(
                         viewModel,
                         RulesPageActions(
@@ -217,28 +257,56 @@ private fun MainPageHost(
 
 private data class MainTopBarState(
     val tab: MainTab,
-    val historyVisible: Boolean
-)
+    val historyVisible: Boolean,
+    val browseVisible: Boolean
+) {
+    val overlayVisible: Boolean get() = historyVisible || browseVisible
+}
 
 private data class MainTopBarActions(
     val onBack: () -> Unit,
-    val onClearHistory: () -> Unit
+    val onClearHistory: () -> Unit,
+    val onClearBrowse: () -> Unit
 )
+
+@Composable
+private fun ClearBrowseHistoryDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("清空浏览历史") },
+        text = { Text("将删除全部帖子浏览记录，操作无法撤销。") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("清空") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainTopBar(state: MainTopBarState, actions: MainTopBarActions) {
     TopAppBar(
-        title = { Text(if (state.historyVisible) "过滤历史" else if (state.tab == MainTab.HOME) "X-ADBlock" else state.tab.title) },
+        title = {
+            Text(
+                when {
+                    state.browseVisible -> "浏览历史"
+                    state.historyVisible -> "过滤历史"
+                    state.tab == MainTab.HOME -> "X-ADBlock"
+                    else -> state.tab.title
+                }
+            )
+        },
         navigationIcon = {
-            if (state.historyVisible) {
+            if (state.overlayVisible) {
                 IconButton(onClick = actions.onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回首页")
                 }
             }
         },
         actions = {
-            if (state.historyVisible) {
+            if (state.browseVisible) {
+                IconButton(onClick = actions.onClearBrowse) {
+                    Icon(Icons.Filled.Delete, contentDescription = "清空浏览历史")
+                }
+            } else if (state.historyVisible) {
                 IconButton(onClick = actions.onClearHistory) {
                     Icon(Icons.Filled.Delete, contentDescription = "清空过滤历史")
                 }

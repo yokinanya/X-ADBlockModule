@@ -37,6 +37,9 @@ public final class Contract {
     /** Item placeholders carried by marked posts (preview text for the mark mode). */
     public static final String KEY_MARK_TEXT = "mark_text";
 
+    /** Browsing history switch: when false the hook stops reporting opened posts. */
+    public static final String KEY_RECORD_VIEWS = "record_views";
+
     /** Line format in the snapshot: kind + '/' + pattern, one rule per line. */
     public static final String KIND_LITERAL = "LITERAL";
     public static final String KIND_REGEX = "REGEX";
@@ -45,6 +48,8 @@ public final class Contract {
 
     public static final String ACTION_BLOCK_EVENTS = "com.xadblock.module.ACTION_BLOCK_EVENTS";
     public static final String ACTION_HEARTBEAT = "com.xadblock.module.ACTION_HEARTBEAT";
+    /** Opened-post (browsing history) events reported by the hook. */
+    public static final String ACTION_VIEW_EVENTS = "com.xadblock.module.ACTION_VIEW_EVENTS";
 
     public static final String EXTRA_COUNT = "count";
     public static final String EXTRA_ITEMS = "items";

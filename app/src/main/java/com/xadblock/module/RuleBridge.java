@@ -39,6 +39,8 @@ public final class RuleBridge {
     private static final long HEARTBEAT_INTERVAL_MS = 120_000L;
     private static final long EVENT_FLUSH_MS = 4_000L;
     private static final int MAX_EVENT_BATCH = 20;
+    /** Re-opening the same post within this window is treated as the same visit. */
+    private static final long VIEW_REPEAT_WINDOW_MS = 60_000L;
     private static final int MAX_RECORDED_ENTRY_IDS = 10_000;
 
     private static final AtomicReference<Snapshot> ACTIVE = new AtomicReference<>();
@@ -59,6 +61,7 @@ public final class RuleBridge {
     private static volatile boolean skipVerified = false;
     private static volatile java.util.Set<String> whitelistUsers = Collections.emptySet();
     private static volatile String markText = "[已拦截]";
+    private static volatile boolean recordViews = true;
 
     static int getDisplayMode() {
         return displayMode;
@@ -66,6 +69,10 @@ public final class RuleBridge {
 
     static String getMarkText() {
         return markText;
+    }
+
+    static boolean isRecordingViews() {
+        return recordViews;
     }
 
     private static final AtomicLong STAT_TOTAL = new AtomicLong();
@@ -88,6 +95,16 @@ public final class RuleBridge {
                 }
             });
     private static final List<PendingBlock> EVENT_QUEUE = Collections.synchronizedList(new ArrayList<>());
+    /** Opened posts waiting to be shipped to the module app (browsing history). */
+    private static final List<PendingView> VIEW_QUEUE = Collections.synchronizedList(new ArrayList<>());
+    /** postId -> last time the open was queued; keeps recompositions from spamming the channel. */
+    private static final Map<String, Long> RECENT_VIEWS =
+            Collections.synchronizedMap(new LinkedHashMap<String, Long>(256, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+                    return size() > 512;
+                }
+            });
     /** Entry IDs already counted and queued during this X process lifetime. */
     private static final Map<String, Boolean> RECORDED_ENTRY_IDS =
             Collections.synchronizedMap(new LinkedHashMap<String, Boolean>(4096, 0.75f, true) {
@@ -143,6 +160,8 @@ public final class RuleBridge {
         EVAL_CACHE.clear();
         RECORDED_ENTRY_IDS.clear();
         EVENT_QUEUE.clear();
+        VIEW_QUEUE.clear();
+        RECENT_VIEWS.clear();
         android.os.Handler handler = MAIN_HANDLER;
         MAIN_HANDLER = null;
         if (handler != null) {
@@ -197,6 +216,7 @@ public final class RuleBridge {
             optSpecialChars = prefs.getBoolean(Contract.KEY_OPT_SPECIAL_CHARS, true);
             optGrok = prefs.getBoolean(Contract.KEY_OPT_GROK, false);
             skipVerified = prefs.getBoolean(Contract.KEY_SKIP_VERIFIED, false);
+            recordViews = prefs.getBoolean(Contract.KEY_RECORD_VIEWS, true);
             java.util.Set<String> configuredUsers = prefs.getStringSet(
                     Contract.KEY_WHITELIST_USERS, Collections.emptySet());
             java.util.HashSet<String> normalizedUsers = new java.util.HashSet<>();
@@ -223,6 +243,7 @@ public final class RuleBridge {
                 || Contract.KEY_OPT_SPECIAL_CHARS.equals(key)
                 || Contract.KEY_OPT_GROK.equals(key)
                 || Contract.KEY_SKIP_VERIFIED.equals(key)
+                || Contract.KEY_RECORD_VIEWS.equals(key)
                 || Contract.KEY_WHITELIST_USERS.equals(key)
                 || Contract.KEY_MARK_TEXT.equals(key);
     }
@@ -576,6 +597,11 @@ public final class RuleBridge {
 
     private static void flushEvents() {
         scheduleNextFlush();
+        flushBlockEvents();
+        flushViewEvents();
+    }
+
+    private static void flushBlockEvents() {
         if (EVENT_QUEUE.isEmpty()) {
             return;
         }
@@ -608,6 +634,67 @@ public final class RuleBridge {
                 context.sendBroadcast(intent);
             } catch (Throwable throwable) {
                 HookEntry.log("failed to send block broadcast: " + throwable);
+            }
+        });
+    }
+
+    /**
+     * Queues one "user opened this post" record. Called from the focal-post hook, so it
+     * runs on the composition thread: keep it to a dedupe lookup plus a list add.
+     */
+    static void recordView(String postId, String url, String handle, String displayName,
+                           String text) {
+        if (!recordViews) return;
+        if (postId == null || postId.isEmpty() || url == null || url.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        synchronized (RECENT_VIEWS) {
+            Long last = RECENT_VIEWS.get(postId);
+            if (last != null && now - last < VIEW_REPEAT_WINDOW_MS) return;
+            RECENT_VIEWS.put(postId, now);
+        }
+        VIEW_QUEUE.add(new PendingView(postId, url, preview(handle, 60),
+                preview(displayName, 60), preview(text, 220)));
+        if (VIEW_QUEUE.size() >= MAX_EVENT_BATCH) {
+            android.os.Handler handler = MAIN_HANDLER;
+            if (handler != null) handler.removeCallbacks(FLUSH_RUNNABLE);
+            flushEvents();
+        }
+    }
+
+    private static void flushViewEvents() {
+        if (VIEW_QUEUE.isEmpty()) {
+            return;
+        }
+        List<PendingView> batch;
+        synchronized (VIEW_QUEUE) {
+            if (VIEW_QUEUE.isEmpty()) return;
+            batch = new ArrayList<>(VIEW_QUEUE.subList(0,
+                    Math.min(VIEW_QUEUE.size(), MAX_EVENT_BATCH)));
+            VIEW_QUEUE.subList(0, batch.size()).clear();
+        }
+        if (batch.isEmpty()) {
+            return;
+        }
+        IO.execute(() -> {
+            try {
+                Context context = targetContext;
+                if (context == null) return;
+                final StringBuilder payload = new StringBuilder();
+                for (PendingView view : batch) {
+                    if (payload.length() > 0) payload.append('\n');
+                    payload.append(view.postId).append('\t')
+                            .append(view.url).append('\t')
+                            .append(view.handle).append('\t')
+                            .append(view.displayName).append('\t')
+                            .append(view.text);
+                }
+                Intent intent = new Intent(Contract.ACTION_VIEW_EVENTS)
+                        .setPackage(Contract.MODULE_PACKAGE)
+                        .putExtra(Contract.EXTRA_COUNT, batch.size())
+                        .putExtra(Contract.EXTRA_ITEMS, payload.toString());
+                context.sendBroadcast(intent);
+            } catch (Throwable throwable) {
+                HookEntry.log("failed to send view broadcast: " + throwable);
             }
         });
     }
@@ -706,6 +793,22 @@ public final class RuleBridge {
             this.preview = preview;
             this.author = author;
             this.postId = postId;
+        }
+    }
+
+    private static final class PendingView {
+        final String postId;
+        final String url;
+        final String handle;
+        final String displayName;
+        final String text;
+
+        PendingView(String postId, String url, String handle, String displayName, String text) {
+            this.postId = postId;
+            this.url = url;
+            this.handle = handle;
+            this.displayName = displayName;
+            this.text = text;
         }
     }
 

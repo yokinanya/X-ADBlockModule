@@ -10,6 +10,10 @@ import com.xadblock.module.data.AppDatabase
 import com.xadblock.module.data.BLOCK_EVENT_HISTORY_LIMIT
 import com.xadblock.module.data.BlockEventEntity
 import com.xadblock.module.data.HeartbeatEntity
+import com.xadblock.module.data.POST_VIEW_HISTORY_LIMIT
+import com.xadblock.module.data.POST_VIEW_RETENTION_MS
+import com.xadblock.module.data.PostViewEntity
+import com.xadblock.module.data.PostViewEvents
 import com.xadblock.module.data.RuleRepository
 import com.xadblock.module.data.RuleEntity
 import com.xadblock.module.data.RuleSnapshotStore
@@ -18,6 +22,7 @@ import com.xadblock.module.data.SubscriptionEntity
 import com.xadblock.module.data.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -42,6 +47,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .all(BLOCK_EVENT_HISTORY_LIMIT)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    /** Posts the user opened in X; newest first, capped by age (7 days) and row count. */
+    val browseHistory: StateFlow<List<PostViewEntity>> = db.postViewDao()
+        .recent(POST_VIEW_HISTORY_LIMIT)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Row count only, so the home screen does not have to hold every record. */
+    val browseCount: StateFlow<Int> = db.postViewDao().countFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    private val _browseQuery = MutableStateFlow("")
+    val browseQuery: StateFlow<String> = _browseQuery
+
+    val browseResults: StateFlow<List<PostViewEntity>> =
+        combine(browseHistory, _browseQuery) { entries, query ->
+            val keyword = query.trim()
+            if (keyword.isEmpty()) entries else entries.filter { PostViewEvents.matches(it, keyword) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val _localCount = MutableStateFlow(0)
     val localCount: StateFlow<Int> = _localCount
 
@@ -64,6 +87,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch(Dispatchers.IO) {
             db.blockEventDao().trim(BLOCK_EVENT_HISTORY_LIMIT)
+            db.postViewDao().deleteOlderThan(System.currentTimeMillis() - POST_VIEW_RETENTION_MS)
+            db.postViewDao().trim(POST_VIEW_HISTORY_LIMIT)
         }
         viewModelScope.launch {
             db.ruleDao().allEnabledFlow().collect { rules ->
@@ -260,6 +285,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 reportFailure("清空过滤历史失败", failure)
             }
         }
+    }
+
+    fun setBrowseQuery(value: String) {
+        _browseQuery.value = value
+    }
+
+    fun clearBrowseHistory() {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { db.postViewDao().clear() }
+                _browseQuery.value = ""
+                _message.value = UiMessage("浏览历史已清空", false)
+            } catch (failure: Throwable) {
+                reportFailure("清空浏览历史失败", failure)
+            }
+        }
+    }
+
+    fun deleteBrowseEntry(entry: PostViewEntity) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { db.postViewDao().delete(entry.postId) }
+                _message.value = UiMessage("记录已删除", false)
+            } catch (failure: Throwable) {
+                reportFailure("删除记录失败", failure)
+            }
+        }
+    }
+
+    fun notifyInfo(text: String) {
+        _message.value = UiMessage(text, false)
     }
 
     fun addWhitelistUser(user: String) {

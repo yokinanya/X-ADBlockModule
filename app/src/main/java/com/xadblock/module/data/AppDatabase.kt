@@ -12,9 +12,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SubscriptionEntity::class,
         RuleEntity::class,
         BlockEventEntity::class,
-        HeartbeatEntity::class
+        HeartbeatEntity::class,
+        PostViewEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -22,6 +23,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun ruleDao(): RuleDao
     abstract fun blockEventDao(): BlockEventDao
     abstract fun heartbeatDao(): HeartbeatDao
+    abstract fun postViewDao(): PostViewDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
@@ -32,7 +34,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "xadblock.db"
-                ).addMigrations(MIGRATION_1_2).build().also { instance = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
             }
         }
 
@@ -40,6 +42,18 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("ALTER TABLE block_events ADD COLUMN matchedRule TEXT")
                 database.execSQL("ALTER TABLE block_events ADD COLUMN author TEXT")
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `post_views` (" +
+                        "`postId` TEXT NOT NULL, `url` TEXT NOT NULL, `author` TEXT NOT NULL, " +
+                        "`authorName` TEXT NOT NULL, `preview` TEXT NOT NULL, `ts` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`postId`))"
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_post_views_ts` ON `post_views` (`ts`)")
             }
         }
     }
