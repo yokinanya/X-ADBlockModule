@@ -1,5 +1,8 @@
 package com.xadblock.module.ui
 
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PersonSearch
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Visibility
@@ -39,11 +43,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.xadblock.module.BuildConfig
 import com.xadblock.module.data.Contract
 
 private data class ToggleSetting(val title: String, val icon: ImageVector)
@@ -61,6 +67,7 @@ internal fun SettingsPage(viewModel: MainViewModel) {
         MatchOptionsSection(viewModel)
         BrowseHistorySection(viewModel)
         WhitelistSection(viewModel)
+        AboutSection(viewModel)
     }
 }
 
@@ -186,6 +193,41 @@ private fun WhitelistSection(viewModel: MainViewModel) {
                 showDialog = false
             }
         )
+    }
+}
+
+private const val PROJECT_URL = "https://github.com/JinShichang/X-ADBlockModule"
+
+@Composable
+private fun AboutSection(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    SettingsSection("关于") {
+        ElevatedCard {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                ListItem(
+                    modifier = Modifier.clickable {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(PROJECT_URL))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }.onFailure { viewModel.reportFailure("无法打开项目主页", it) }
+                    },
+                    leadingContent = { Icon(Icons.Filled.Link, contentDescription = null) },
+                    headlineContent = { Text("项目主页（GitHub）") },
+                    supportingContent = { Text(PROJECT_URL, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
+                Text(
+                    "X-ADBlock " + BuildConfig.VERSION_NAME + "(" + BuildConfig.VERSION_CODE + ")",
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 

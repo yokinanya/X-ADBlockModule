@@ -64,6 +64,7 @@ app/build/outputs/apk/debug/app-debug.apk
   - 「本地规则」：导入 TXT 或清空本地规则。
   - 「历史」：查看或清空命中记录。
   - 首页「浏览历史」：查看点开过的帖子，支持搜索、单条删除与一键清空（保留 7 天）。
+  - 「设置」底部「关于」：显示当前版本，点按打开本项目 GitHub 主页。
 4. 点进任意推文查看回复效果。
 
 模块配置由现代元数据声明：`META-INF/xposed/module.prop`、`java_init.list`、`scope.list`。API 102 支持模块热重载；更新模块后，旧代 hook 会先清理，再由新代重新安装。
