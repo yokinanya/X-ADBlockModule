@@ -10,6 +10,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Module-side log writer to the module-private filesDir/logs directory. Hook
@@ -26,14 +27,17 @@ object ModuleLogger {
     private val queue = ArrayBlockingQueue<String>(QUEUE_CAPACITY)
     private val time = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US)
     private val fileLock = Any()
+    private val enabled = AtomicBoolean(true)
     private var started = false
     private var contextRef: Context? = null
 
     @Synchronized
     fun init(context: Context) {
         if (!started) {
+            val appContext = context.applicationContext
             started = true
-            contextRef = context.applicationContext
+            enabled.set(SettingsStore.load(appContext).loggingEnabled)
+            contextRef = appContext
             Thread { flushLoop() }.apply {
                 name = "xadblock-module-log"
                 isDaemon = true
@@ -43,10 +47,12 @@ object ModuleLogger {
     }
 
     fun log(message: String) {
+        if (!enabled.get()) return
         enqueue("${timestamp()} $message")
     }
 
     fun logHookBatch(text: String) {
+        if (!enabled.get()) return
         text.lineSequence()
             .filter { it.isNotEmpty() }
             .forEach(::enqueue)
@@ -62,6 +68,13 @@ object ModuleLogger {
         val output = appContext.contentResolver.openOutputStream(uri)
             ?: throw IOException("无法打开导出目标")
         output.use { it.write(content) }
+    }
+
+    fun setEnabled(value: Boolean) {
+        synchronized(fileLock) {
+            enabled.set(value)
+            if (!value) queue.clear()
+        }
     }
 
     private fun flushLoop() {
@@ -86,22 +99,30 @@ object ModuleLogger {
     }
 
     private fun append(text: String) {
+        if (!enabled.get()) return
         val context = contextRef ?: return
         try {
             synchronized(fileLock) {
-                appendLocked(context, text)
+                if (enabled.get()) appendLocked(context, text)
             }
         } catch (failure: Throwable) {
-            android.util.Log.e("X-ADBlock", "module log append failed", failure)
+            if (enabled.get()) {
+                android.util.Log.e("X-ADBlock", "module log append failed", failure)
+            }
         }
     }
 
     private fun flushPending(context: Context) {
-        val lines = ArrayList<String>()
-        queue.drainTo(lines)
-        if (lines.isEmpty()) return
         synchronized(fileLock) {
-            appendLocked(context, lines.joinToString("\n") + "\n")
+            if (!enabled.get()) {
+                queue.clear()
+                return
+            }
+            val lines = ArrayList<String>()
+            queue.drainTo(lines)
+            if (lines.isNotEmpty()) {
+                appendLocked(context, lines.joinToString("\n") + "\n")
+            }
         }
     }
 
@@ -134,7 +155,9 @@ object ModuleLogger {
         File(File(context.filesDir, LOG_DIRECTORY), FILE_NAME)
 
     private fun enqueue(line: String) {
-        queue.offer(line)
+        synchronized(fileLock) {
+            if (enabled.get()) queue.offer(line)
+        }
     }
 
     private fun timestamp(): String = synchronized(time) {

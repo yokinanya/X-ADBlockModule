@@ -43,6 +43,8 @@ public final class Contract {
 
     /** Item placeholders carried by marked posts (preview text for the mark mode). */
     public static final String KEY_MARK_TEXT = "mark_text";
+    /** Controls module-generated logs in both the app and injected target process. */
+    public static final String KEY_LOGGING_ENABLED = "logging_enabled";
 
     /** Browsing history switch: when false the hook stops reporting opened posts. */
     public static final String KEY_RECORD_VIEWS = "record_views";

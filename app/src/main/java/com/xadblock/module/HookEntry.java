@@ -18,6 +18,8 @@ import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam;
 import io.github.libxposed.api.XposedModuleInterface.HotReloadingParam;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 
+import com.xadblock.module.data.Contract;
+
 /**
  * X-ADBlock entry point. Hooks the official X Android app (com.twitter.android),
  * removes posts whose text/url matches the cloud/local keyword rulesets.
@@ -30,6 +32,8 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 public final class HookEntry extends XposedModule {
     private static final String TAG = "[X-ADBlock]";
     private static volatile HookEntry activeInstance;
+    private static volatile boolean loggingEnabled = true;
+    private static volatile boolean loggingPolicyLoaded;
 
     private final List<HookHandle> hookHandles = new CopyOnWriteArrayList<>();
 
@@ -190,6 +194,58 @@ public final class HookEntry extends XposedModule {
         return instance.getRemotePreferences(group);
     }
 
+    static boolean isLoggingEnabled() {
+        if (!loggingPolicyLoaded && activeInstance != null) {
+            refreshLoggingPolicy();
+        }
+        return loggingEnabled;
+    }
+
+    static void refreshLoggingPolicy() {
+        HookEntry instance = activeInstance;
+        if (instance == null) {
+            return;
+        }
+        Boolean resolved = readRemoteLoggingPolicy();
+        setLoggingEnabled(resolved == null || resolved);
+    }
+
+    static void setLoggingEnabled(boolean enabled) {
+        loggingEnabled = enabled;
+        loggingPolicyLoaded = true;
+        if (!enabled) {
+            HookLogSink.clear();
+        }
+    }
+
+    static void resetLoggingPolicy() {
+        loggingPolicyLoaded = false;
+    }
+
+    private static Boolean readRemoteLoggingPolicy() {
+        String content = readRemoteFile(Contract.SNAPSHOT_FILE);
+        if (content != null) {
+            for (String line : content.split("\\r?\\n")) {
+                if (line.startsWith("#loggingEnabled=")) {
+                    return Boolean.parseBoolean(line.substring("#loggingEnabled=".length()).trim());
+                }
+            }
+        }
+        try {
+            HookEntry instance = activeInstance;
+            if (instance == null) {
+                return null;
+            }
+            SharedPreferences prefs = instance.getRemotePreferences(Contract.PREF_SNAPSHOT);
+            if (prefs.contains(Contract.KEY_LOGGING_ENABLED)) {
+                return prefs.getBoolean(Contract.KEY_LOGGING_ENABLED, true);
+            }
+        } catch (Throwable ignored) {
+            // Use the enabled default when the framework has no policy yet.
+        }
+        return null;
+    }
+
     private HookHandle register(
             Executable executable, String id, XposedInterface.Hooker hooker) {
         HookHandle handle = hook(executable)
@@ -201,6 +257,9 @@ public final class HookEntry extends XposedModule {
     }
 
     static void log(String message) {
+        if (!isLoggingEnabled()) {
+            return;
+        }
         HookEntry instance = activeInstance;
         if (instance != null) {
             instance.log(Log.INFO, TAG, message);
@@ -211,6 +270,9 @@ public final class HookEntry extends XposedModule {
     }
 
     private static void logError(String message) {
+        if (!isLoggingEnabled()) {
+            return;
+        }
         HookEntry instance = activeInstance;
         if (instance != null) {
             instance.log(Log.ERROR, TAG, message);
@@ -221,6 +283,9 @@ public final class HookEntry extends XposedModule {
     }
 
     private static void logError(String message, Throwable throwable) {
+        if (!isLoggingEnabled()) {
+            return;
+        }
         HookEntry instance = activeInstance;
         if (instance != null) {
             instance.log(Log.ERROR, TAG, message, throwable);
@@ -232,6 +297,9 @@ public final class HookEntry extends XposedModule {
     }
 
     static void logThrowable(Throwable throwable) {
+        if (!isLoggingEnabled()) {
+            return;
+        }
         java.io.StringWriter writer = new java.io.StringWriter();
         throwable.printStackTrace(new java.io.PrintWriter(writer));
         for (String line : writer.toString().split("\\r?\\n")) {

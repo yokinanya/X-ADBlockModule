@@ -44,7 +44,17 @@ public final class HookLogSink {
     }
 
     public static void log(String message) {
+        if (!HookEntry.isLoggingEnabled()) {
+            return;
+        }
         QUEUE.offer(timestamp() + " hook|" + message);
+    }
+
+    public static void clear() {
+        QUEUE.clear();
+        synchronized (HookLogSink.class) {
+            FALLBACK.setLength(0);
+        }
     }
 
     private static void flushLoop() {
@@ -96,6 +106,9 @@ public final class HookLogSink {
     }
 
     private static void append(String text) {
+        if (!HookEntry.isLoggingEnabled()) {
+            return;
+        }
         Context appContext = context;
         if (appContext == null) {
             pushFallback(text);
@@ -107,8 +120,10 @@ public final class HookLogSink {
                     .putExtra(Contract.EXTRA_LOG, text);
             appContext.sendBroadcast(intent);
         } catch (Throwable failure) {
-            Log.e(TAG, "hook log broadcast failed", failure);
-            pushFallback(text);
+            if (HookEntry.isLoggingEnabled()) {
+                Log.e(TAG, "hook log broadcast failed", failure);
+                pushFallback(text);
+            }
         }
     }
 

@@ -69,6 +69,7 @@ internal fun SettingsPage(viewModel: MainViewModel, onExportLogs: () -> Unit) {
         MatchOptionsSection(viewModel)
         BrowseHistorySection(viewModel)
         WhitelistSection(viewModel)
+        LoggingSection(viewModel)
         AboutSection(viewModel, onExportLogs)
     }
 }
@@ -194,6 +195,26 @@ private fun WhitelistSection(viewModel: MainViewModel) {
                 viewModel.addWhitelistUser(it)
                 showDialog = false
             }
+        )
+    }
+}
+
+@Composable
+private fun LoggingSection(viewModel: MainViewModel) {
+    val settings by viewModel.settings.collectAsState()
+    SettingsSection("诊断日志") {
+        SettingToggle(
+            ToggleSetting("启用诊断日志", Icons.Filled.DataObject),
+            settings.loggingEnabled
+        ) { checked ->
+            viewModel.updateSettings(settings.copy(loggingEnabled = checked))
+        }
+        Text(
+            if (settings.loggingEnabled) "记录模块与 hook 的运行日志"
+            else "已关闭，不会产生新的模块或 hook 日志",
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
