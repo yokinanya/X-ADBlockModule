@@ -42,14 +42,13 @@ public final class HookEntry extends XposedModule {
         if (!"com.twitter.android".equals(param.getPackageName()) || !param.isFirstPackage()) {
             return;
         }
-        log(Log.INFO, TAG, "loading into " + param.getPackageName());
+        log("loading into " + param.getPackageName());
 
         try {
             hookApplicationAttach();
             TimelineFilter.install(param.getClassLoader());
         } catch (Throwable failure) {
-            log(Log.ERROR, TAG, "failed to install target hooks", failure);
-            logThrowable(failure);
+            logError("failed to install target hooks", failure);
         }
         // Browsing history is independent from filtering: keep it alive even if the
         // feed filter failed to install, and never let it break the filter either.
@@ -90,21 +89,20 @@ public final class HookEntry extends XposedModule {
             HookLogSink.init(context);
             RuleBridge.initialize(context);
         } else {
-            log(Log.ERROR, TAG, "hot reload: no current Application; bridge stays idle");
+            logError("hot reload: no current Application; bridge stays idle");
         }
         if (classLoader == null) {
-            log(Log.ERROR, TAG, "hot reload: target class loader not resolved");
+            logError("hot reload: target class loader not resolved");
             return;
         }
         try {
             hookApplicationAttach();
             TimelineFilter.install(classLoader);
         } catch (Throwable failure) {
-            log(Log.ERROR, TAG, "failed to reinstall hooks after hot reload", failure);
-            logThrowable(failure);
+            logError("failed to reinstall hooks after hot reload", failure);
         }
         PostViewTracker.install(classLoader);
-        log(Log.INFO, TAG, "hot reload complete");
+        log("hot reload complete");
     }
 
     /** The running app instance; the only way back to a Context after a hot reload. */
@@ -129,7 +127,7 @@ public final class HookEntry extends XposedModule {
             }
             return result;
         });
-        log(Log.INFO, TAG, "Application.attach hook installed");
+        log("Application.attach hook installed");
     }
 
     static HookHandle registerHook(
@@ -210,6 +208,27 @@ public final class HookEntry extends XposedModule {
             Log.i(TAG, message);
         }
         HookLogSink.log(message);
+    }
+
+    private static void logError(String message) {
+        HookEntry instance = activeInstance;
+        if (instance != null) {
+            instance.log(Log.ERROR, TAG, message);
+        } else {
+            Log.e(TAG, message);
+        }
+        HookLogSink.log(message);
+    }
+
+    private static void logError(String message, Throwable throwable) {
+        HookEntry instance = activeInstance;
+        if (instance != null) {
+            instance.log(Log.ERROR, TAG, message, throwable);
+        } else {
+            Log.e(TAG, message, throwable);
+        }
+        HookLogSink.log(message);
+        logThrowable(throwable);
     }
 
     static void logThrowable(Throwable throwable) {

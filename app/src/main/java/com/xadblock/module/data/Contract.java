@@ -8,7 +8,7 @@ package com.xadblock.module.data;
  *  - The module app writes snapshots through LibXposed Remote Preferences.
  *  - The injected target process reads the same remote preference group through
  *    XposedInterface.getRemotePreferences(String).
- *  - Blocks/heartbeats go back through an exported broadcast (Binder-safe batching).
+ *  - Blocks, hook logs, and heartbeats go back through exported broadcasts (Binder-safe batching).
  */
 public final class Contract {
     public static final String TARGET_PACKAGE = "com.twitter.android";
@@ -55,6 +55,8 @@ public final class Contract {
 
     public static final String ACTION_BLOCK_EVENTS = "com.xadblock.module.ACTION_BLOCK_EVENTS";
     public static final String ACTION_HEARTBEAT = "com.xadblock.module.ACTION_HEARTBEAT";
+    /** Hook log batches routed into the module app's private log file. */
+    public static final String ACTION_HOOK_LOGS = "com.xadblock.module.ACTION_HOOK_LOGS";
     /** Opened-post (browsing history) events reported by the hook. */
     public static final String ACTION_VIEW_EVENTS = "com.xadblock.module.ACTION_VIEW_EVENTS";
 
